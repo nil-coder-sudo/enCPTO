@@ -1,5 +1,7 @@
 # 🔐 enCPTO — Military-Grade Dual-Layer Encryption Tool
 
+**Repo:** [nil-coder-sudo/enCPTO](https://github.com/nil-coder-sudo/enCPTO) · **Script:** [`enCPTO-v6-2.py`](https://github.com/nil-coder-sudo/enCPTO/blob/main/enCPTO-v6-2.py)
+
 **enCPTO** is a desktop file & folder encryption application built with Python and PyQt6. It combines a from-scratch AES-256 implementation, Argon2id key derivation, HMAC-SHA256 integrity verification, TOTP-based multi-factor authentication, and optional GPU (OpenCL) acceleration into a single, self-contained, offline tool.
 
 No cloud, no telemetry, no accounts. Your key never leaves your machine.
@@ -89,10 +91,23 @@ Optional, for GPU acceleration:
 pip install pyopencl numpy
 ```
 
+### Download
+
+```bash
+curl -L -o enCPTO-v6-2.py https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v6-2.py
+```
+
+Or clone the repository:
+
+```bash
+git clone https://github.com/nil-coder-sudo/enCPTO.git
+cd enCPTO
+```
+
 ### Run
 
 ```bash
-python encpto.py
+python enCPTO-v6-2.py
 ```
 
 On first launch you'll be guided through the **Security Setup Wizard**: choose a PIN, scan the generated QR code into an authenticator app, and save your one-time recovery codes somewhere safe. From then on, every launch starts with a PIN prompt, and every encrypt/decrypt action requires a TOTP code.
@@ -113,7 +128,7 @@ On first launch you'll be guided through the **Security Setup Wizard**: choose a
 
 ## 🗂️ Project Structure
 
-This is currently a single-file application (`encpto.py`) organized into clearly separated sections:
+This is currently a single-file application (`enCPTO-v6-2.py`) organized into clearly separated sections:
 
 - Secure memory helpers
 - AES-256 key expansion + OpenCL kernel + `GpuManager`
