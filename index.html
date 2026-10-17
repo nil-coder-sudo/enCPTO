@@ -300,17 +300,18 @@
   <section class="hero">
     <div class="wrap hero-grid">
       <div>
-        <span class="eyebrow">v6.2 · Offline &amp; Open Source</span>
+        <span class="eyebrow">v7.0 · Offline &amp; Open Source</span>
         <h1>Encrypt anything.<br>Trust <span>no server.</span></h1>
         <p class="lede">
           enCPTO is a desktop tool that locks files and folders behind
-          <strong>Argon2id + AES-256 + HMAC-SHA256</strong>, guarded by a local
-          <strong>PIN + TOTP</strong> gate. No accounts, no cloud, no telemetry —
+          a dual cipher cascade — <strong>AES-256 + XChaCha20-Poly1305</strong> — keyed by
+          <strong>Argon2id</strong> and sealed with <strong>HMAC-SHA512</strong>. Just one password:
+          no PIN, no authenticator app, no accounts, no cloud, no telemetry —
           the key derivation and the ciphertext never leave your machine.
         </p>
         <div class="cta-row">
-          <a href="https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v6-2.py" class="btn btn-primary" download>Download enCPTO-v6-2.py</a>
-          <a href="https://github.com/nil-coder-sudo/enCPTO/blob/main/enCPTO-v6-2.py" class="btn btn-ghost">View source on GitHub</a>
+          <a href="https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v7.py" class="btn btn-primary" download>Download enCPTO-v7.py</a>
+          <a href="https://github.com/nil-coder-sudo/enCPTO/blob/main/enCPTO-v7.py" class="btn btn-ghost">View source on GitHub</a>
         </div>
         <div class="meta-line">
           <span><b>Platforms</b> — Win · macOS · Linux</span>
@@ -337,7 +338,7 @@
           <!-- Argon2id box -->
           <rect x="20" y="92" width="150" height="54" rx="2" fill="none" stroke="#F5B942" stroke-width="1.4"/>
           <text x="95" y="114" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700" fill="#F5B942">ARGON2id</text>
-          <text x="95" y="132" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#9FB8D1">t3 · m64MB · p4</text>
+          <text x="95" y="132" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#9FB8D1">t4 · m256MB · p4</text>
 
           <!-- split arrows -->
           <line x1="95" y1="146" x2="95" y2="166" stroke="#6FB8E6" stroke-width="1.2"/>
@@ -346,11 +347,11 @@
 
           <!-- AES key -->
           <rect x="8" y="192" width="104" height="40" rx="2" fill="none" stroke="#6FB8E6" stroke-width="1.2"/>
-          <text x="60" y="216" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#EAF2FA">AES-256 key</text>
+          <text x="60" y="216" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#EAF2FA">Cipher keys</text>
 
           <!-- HMAC key -->
           <rect x="150" y="192" width="104" height="40" rx="2" fill="none" stroke="#6FB8E6" stroke-width="1.2"/>
-          <text x="202" y="216" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#EAF2FA">HMAC key</text>
+          <text x="202" y="216" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="#EAF2FA">HMAC-512 key</text>
 
           <!-- Plaintext chunks -->
           <text x="330" y="45" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="12" fill="#EAF2FA">PLAINTEXT</text>
@@ -364,8 +365,8 @@
 
           <!-- Cipher engine -->
           <rect x="260" y="102" width="140" height="60" rx="2" fill="none" stroke="#F5B942" stroke-width="1.4"/>
-          <text x="330" y="124" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700" fill="#F5B942">AES-256</text>
-          <text x="330" y="140" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#9FB8D1">CTR (GPU) / GCM (CPU)</text>
+          <text x="330" y="124" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" font-weight="700" fill="#F5B942">AES-256 → XChaCha20</text>
+          <text x="330" y="140" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#9FB8D1">CTR · Poly1305 AEAD</text>
           <text x="330" y="154" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#6FB8E6">4&#160;MB chunk stream</text>
 
           <line x1="112" y1="212" x2="260" y2="132" stroke="#6FB8E6" stroke-width="1" stroke-dasharray="2 3"/>
@@ -375,7 +376,7 @@
 
           <!-- HMAC verify -->
           <rect x="230" y="198" width="200" height="46" rx="2" fill="none" stroke="#6FB8E6" stroke-width="1.2"/>
-          <text x="330" y="218" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11.5" fill="#EAF2FA">HMAC-SHA256 tag</text>
+          <text x="330" y="218" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11.5" fill="#EAF2FA">HMAC-SHA512 tag</text>
           <text x="330" y="234" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9" fill="#9FB8D1">header + full ciphertext</text>
 
           <line x1="330" y1="244" x2="330" y2="270" stroke="#6FB8E6" stroke-width="1.2" marker-end="url(#arrow)"/>
@@ -383,7 +384,7 @@
           <!-- Output file -->
           <rect x="230" y="272" width="200" height="54" rx="2" fill="none" stroke="#F5B942" stroke-width="1.6"/>
           <text x="330" y="296" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="13" font-weight="800" fill="#F5B942">*.DAT</text>
-          <text x="330" y="313" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#9FB8D1">V6 container · name embedded</text>
+          <text x="330" y="313" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#9FB8D1">V7 container · name encrypted</text>
 
           <!-- dimension line footer -->
           <line x1="8" y1="352" x2="472" y2="352" stroke="#3A6A93" stroke-width="1"/>
@@ -405,23 +406,23 @@
       <div class="grid-cards">
         <div class="card">
           <span class="num">01</span>
-          <h3>From-scratch AES-256</h3>
-          <p>Custom S-box, key schedule, and round functions, with a hand-written OpenCL kernel for GPU-accelerated CTR mode. Falls back to a validated CPU path automatically.</p>
+          <h3>Dual-cipher cascade</h3>
+          <p>Layer 1 is AES-256-CTR (a hand-written OpenCL kernel on GPU, or CPU); layer 2 is XChaCha20-Poly1305 with an independent key. Reading your data means breaking both.</p>
         </div>
         <div class="card">
           <span class="num">02</span>
           <h3>Argon2id key derivation</h3>
-          <p>Memory-hard KDF (t=3, m=64MB, p=4) resists GPU/ASIC cracking far better than PBKDF2. A lighter profile secures the local unlock PIN.</p>
+          <p>Memory-hard KDF (t=4, m=256MB, p=4, 32-byte salt) resists GPU/ASIC cracking; HKDF-SHA512 splits it into separate keys for every layer.</p>
         </div>
         <div class="card">
           <span class="num">03</span>
           <h3>Authenticated everything</h3>
-          <p>HMAC-SHA256 covers the header and every ciphertext chunk. The full tag is verified before a single byte of plaintext is written.</p>
+          <p>Each chunk is sealed to the header, its index and a final-chunk flag, and HMAC-SHA512 covers the whole file — verified before a single byte of plaintext is written.</p>
         </div>
         <div class="card">
           <span class="num">04</span>
-          <h3>PIN + TOTP + recovery</h3>
-          <p>A setup wizard walks you through a local PIN, an authenticator-app TOTP secret, and one-time recovery codes — required before every operation.</p>
+          <h3>Nothing leaks, nothing to set up</h3>
+          <p>The original filename and type are encrypted too. No PIN, no authenticator, no wizard — open the app, enter your password, done. Old v6 files still decrypt.</p>
         </div>
         <div class="card">
           <span class="num">05</span>
@@ -448,7 +449,7 @@
       <div class="install-grid">
         <div class="code-panel">
           <div class="code-head"><span>Terminal — required</span><button class="copy-btn" onclick="copyCode('c1')">Copy</button></div>
-          <pre id="c1">pip install PyQt6 pycryptodome argon2-cffi pyotp qrcode[pil] Pillow</pre>
+          <pre id="c1">pip install PyQt6 pycryptodome argon2-cffi</pre>
         </div>
         <div class="code-panel">
           <div class="code-head"><span>Terminal — optional GPU</span><button class="copy-btn" onclick="copyCode('c2')">Copy</button></div>
@@ -461,7 +462,7 @@ pip install pyopencl numpy</pre>
 
       <div class="code-panel">
         <div class="code-head"><span>Terminal — run</span><button class="copy-btn" onclick="copyCode('c3')">Copy</button></div>
-        <pre id="c3">python enCPTO-v6-2.py</pre>
+        <pre id="c3">python enCPTO-v7.py</pre>
       </div>
     </div>
   </section>
@@ -470,16 +471,16 @@ pip install pyopencl numpy</pre>
     <div class="wrap">
       <div class="section-head">
         <span class="tag">Download</span>
-        <h2>Get enCPTO v6.2</h2>
+        <h2>Get enCPTO v7.0</h2>
         <p>enCPTO is a single Python file. Download it directly, or clone the repository. Works on Windows, macOS, and Linux with Python 3.10+.</p>
       </div>
 
       <div class="platform" data-os="Single File" style="max-width:640px;">
-        <h3>enCPTO-v6-2.py</h3>
-        <p>The complete application — cipher engine, MFA, GPU kernel, and UI — in one file. No build step required.</p>
+        <h3>enCPTO-v7.py</h3>
+        <p>The complete application — cipher engine, GPU kernel, and UI — in one file. No build step required.</p>
         <div class="dl">
           <span>nil-coder-sudo / enCPTO</span>
-          <a href="https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v6-2.py" download>Download raw file →</a>
+          <a href="https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v7.py" download>Download raw file →</a>
         </div>
       </div>
 
@@ -489,15 +490,15 @@ pip install pyopencl numpy</pre>
         <div class="code-head"><span>Or clone the repository</span><button class="copy-btn" onclick="copyCode('c4')">Copy</button></div>
         <pre id="c4">git clone https://github.com/nil-coder-sudo/enCPTO.git
 cd enCPTO
-python enCPTO-v6-2.py</pre>
+python enCPTO-v7.py</pre>
       </div>
 
       <div style="height:14px;"></div>
 
       <div class="code-panel">
         <div class="code-head"><span>Or download with curl</span><button class="copy-btn" onclick="copyCode('c5')">Copy</button></div>
-        <pre id="c5">curl -L -o enCPTO-v6-2.py https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v6-2.py
-python enCPTO-v6-2.py</pre>
+        <pre id="c5">curl -L -o enCPTO-v7.py https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v7.py
+python enCPTO-v7.py</pre>
       </div>
     </div>
   </section>
@@ -512,7 +513,8 @@ python enCPTO-v6-2.py</pre>
         <div class="ico">!</div>
         <p>
           <strong>There is no password recovery.</strong> If you forget an encryption key, the data is unrecoverable by design.
-          This custom AES-256 implementation has not undergone formal third-party audit — for regulated or high-stakes use,
+          Your password is the only key — keep it in a password manager.
+          This project has not undergone a formal third-party audit — for regulated or high-stakes use,
           prefer audited cryptographic libraries. Secure shredding cannot guarantee unrecoverability on SSDs or
           journaling/snapshotting filesystems. Always keep independent backups of anything important.
         </p>
@@ -525,7 +527,7 @@ python enCPTO-v6-2.py</pre>
   <div class="wrap">
     <div class="titleblock">
       <div><b>Project</b>enCPTO</div>
-      <div><b>Revision</b>v6.2</div>
+      <div><b>Revision</b>v7.0</div>
       <div><b>Drawn</b>PyQt6 / Python 3.10+</div>
     </div>
     <div class="foot-links">

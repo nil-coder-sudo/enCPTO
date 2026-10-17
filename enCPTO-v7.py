@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 """
-enCPTO v6.2 — AES-256 + SHA-256 HMAC + OpenCL GPU Booster + MFA + Themes + Settings Panel
+enCPTO v7.0 — Argon2id + AES-256-CTR ⊕ XChaCha20-Poly1305 cascade + HMAC-SHA512
 ═══════════════════════════════════════════════════════════════════════════════════════════
-升級摘要 (v6.1 → v6.2):
+升級摘要 (v6.2 → v7.0):
+  ① [REMOVED] 移除 PIN 碼、TOTP 兩步驗證與救援碼 — 只需加密密碼即可使用
+  ② [NEW] V7 加密格式 (向下相容解密 V2 ~ V6):
+       • Argon2id 強化至 t=4, m=256 MiB, p=4，並以 HKDF-SHA512 分出獨立子金鑰
+       • 雙層串接加密：AES-256-CTR (可 GPU 加速) → XChaCha20-Poly1305
+       • 每個區塊綁定索引與「最後區塊」旗標，防止重排 / 截斷 / 拼接攻擊
+       • 全檔 HMAC-SHA512 驗證 (取代 HMAC-SHA256)，驗證通過才寫出明文
+       • 原始檔名與檔案類型改為加密儲存，不再以明文寫在檔頭
+       • 32-byte 隨機 salt；Argon2 參數寫入檔頭並受 MAC 保護
+  ③ [CHANGE] 解密時選擇輸出資料夾，自動還原原始檔名 (同名時自動加序號)
+
+繼承自 v6.2:
   ① [NEW] 獨立設定頁面 (Settings Panel)
   ② [NEW] 透明度滑桿控制背景可見度 (0%=背景完全可見, 100%=純主題色)
   ③ [NEW] 元件不透明度控制 (0%=完全透明, 100%=完全不透明)
@@ -13,32 +24,29 @@ enCPTO v6.2 — AES-256 + SHA-256 HMAC + OpenCL GPU Booster + MFA + Themes + Set
   ② 六種主題 (Dark / Light / System / Auto / Army Green / Deep Hacker)
 
 繼承自 v6:
-  ① 原始檔名自動嵌入加密檔 (V6 Header)
-  ② PIN 碼鎖定 + TOTP 驗證 + 緊急救援碼
-  ③ 資料夾批量加密 (Directory Archive Mode)
-  ④ DoD 5220.22-M 安全粉碎機
-  ⑤ Argon2id + AES-256-CTR/GCM + HMAC-SHA256
-  ⑥ GPU OpenCL 加速
+  ① 資料夾批量加密 (Directory Archive Mode)
+  ② DoD 5220.22-M 安全粉碎機
+  ③ GPU OpenCL 加速
 
 Install:
-  pip install pyopencl numpy argon2-cffi pycryptodome PyQt6 pyotp qrcode[pil] Pillow
+  pip install PyQt6 pycryptodome argon2-cffi
+  pip install pyopencl numpy          # optional, GPU acceleration
 """
 
 import sys, os, re, struct, hashlib, ctypes, mmap, secrets, string, io, zipfile, shutil
-import json, time, base64, tempfile
+import json
 import hmac as hmac_mod
-from typing import Iterator
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox,
     QCheckBox, QStatusBar, QStackedWidget, QTextEdit, QGroupBox,
-    QProgressBar, QSlider, QDialog, QDialogButtonBox, QFrame,
-    QScrollArea, QComboBox, QTabWidget, QSizePolicy, QSpacerItem,
+    QProgressBar, QSlider, QFrame,
+    QScrollArea, QComboBox, QTabWidget,
 )
 from PyQt6.QtGui import (
-    QPixmap, QFont, QDragEnterEvent, QDropEvent, QImage,
-    QPalette, QColor, QPainter, QBrush,
+    QPixmap, QFont, QDragEnterEvent, QDropEvent,
+    QPalette, QColor, QPainter,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QTime
 
@@ -51,18 +59,6 @@ try:
 except ImportError:
     _ARGON2_AVAILABLE = False
 
-try:
-    import pyotp
-    _PYOTP_AVAILABLE = True
-except ImportError:
-    _PYOTP_AVAILABLE = False
-
-try:
-    import qrcode
-    from PIL import Image as PILImage
-    _QRCODE_AVAILABLE = True
-except ImportError:
-    _QRCODE_AVAILABLE = False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -329,40 +325,40 @@ GPU = GpuManager()
 # ═══════════════════════════════════════════════════════════
 #  Crypto constants
 # ═══════════════════════════════════════════════════════════
+MAGIC_V7   = b"ENCPTO7\x00"
 MAGIC_V6   = b"ENCPTO6\x00"
 MAGIC_V4   = b"ENCPTO4\x00"
 MAGIC_V3   = b"ENCPTO3\x00"
 MAGIC_V2   = b"ENCPTO2\x00"
-MODE_CTR   = 0x01
-MODE_GCM   = 0x02
+MODE_CTR   = 0x01          # legacy V3–V6 only
+MODE_GCM   = 0x02          # legacy V3–V6 only
 FLAG_FILE  = 0x00
 FLAG_ZIP   = 0x01
 CHUNK_SIZE = 4 * 1024 * 1024
 
+# Legacy (V3–V6) Argon2id profile — used only to decrypt old files
 ARGON2_TIME    = 3
 ARGON2_MEM_KB  = 65536
 ARGON2_PAR     = 4
 ARGON2_HASH_LEN= 64
 ARGON2_SALT_LEN= 16
 
-PIN_ARGON2_TIME   = 2
-PIN_ARGON2_MEM_KB = 8192
-PIN_ARGON2_PAR    = 2
-PIN_ARGON2_LEN    = 32
+# V7 Argon2id profile (stored in each file header, so it can be raised later
+# without breaking older V7 files)
+V7_ARGON2_TIME    = 4
+V7_ARGON2_MEM_KB  = 256 * 1024        # 256 MiB
+V7_ARGON2_PAR     = 4
+V7_SALT_LEN       = 32
+V7_KDF_LIMIT_TIME = 64                # sanity caps when reading untrusted headers
+V7_KDF_LIMIT_MEM  = 4 * 1024 * 1024   # 4 GiB
+V7_KDF_LIMIT_PAR  = 64
 
 PBKDF2_ITERS = 1_000_000
 
 HEADER_SIZE_V4 = 8 + 1 + 1 + ARGON2_SALT_LEN + 12 + 32  # = 70
 
 CONFIG_DIR   = os.path.join(os.path.expanduser("~"), ".encpto")
-CONFIG_FILE  = os.path.join(CONFIG_DIR, "security.cfg")
 UI_PREF_FILE = os.path.join(CONFIG_DIR, "ui_prefs.cfg")
-
-MAX_PIN_ATTEMPTS    = 3
-PIN_LOCKOUT_SECONDS = 60
-
-RECOVERY_CODE_COUNT  = 5
-RECOVERY_CODE_LENGTH = 16
 
 MAX_EMBEDDED_NAME_BYTES = 255
 
@@ -622,18 +618,6 @@ def _kdf_argon2(pwd: bytes, salt: bytes) -> '_SecureKey':
     return sk
 
 
-def _kdf_argon2_pin(pin: bytes, salt: bytes) -> bytes:
-    if not _ARGON2_AVAILABLE:
-        raise RuntimeError("argon2-cffi not installed.")
-    raw = hash_secret_raw(
-        secret=pin, salt=salt,
-        time_cost=PIN_ARGON2_TIME, memory_cost=PIN_ARGON2_MEM_KB,
-        parallelism=PIN_ARGON2_PAR, hash_len=PIN_ARGON2_LEN,
-        type=Argon2Type.ID,
-    )
-    return raw
-
-
 def _kdf_pbkdf2_legacy(pwd: bytes, salt: bytes) -> bytes:
     from Crypto.Protocol.KDF import PBKDF2
     return PBKDF2(pwd, salt, dkLen=64, count=PBKDF2_ITERS)
@@ -647,21 +631,149 @@ def _chunk_nonce(base_nonce: bytes, chunk_idx: int) -> bytes:
     return bytes(n)
 
 
-def _cfg_encrypt(data: bytes, key: bytes) -> bytes:
-    nonce  = get_random_bytes(12)
-    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-    ct, tag = cipher.encrypt_and_digest(data)
-    return nonce + tag + ct
+# ═══════════════════════════════════════════════════════════
+#  V7 primitives
+#  ─────────────────────────────────────────────────────────
+#  Password ─► Argon2id(t, m, p; 32-byte salt) ─► 64-byte master
+#  master  ─► HKDF-SHA512(salt = SHA-512(header)) ─► 4 × 32-byte subkeys
+#               k_aes  : layer 1  AES-256-CTR        (GPU or CPU)
+#               k_xcc  : layer 2  XChaCha20-Poly1305 (per-chunk AEAD)
+#               k_mac  : 64-byte  HMAC-SHA512 over the whole container
+#  Two independent ciphers from different design families: an attacker
+#  has to break BOTH AES-256 and ChaCha20 (plus forge Poly1305 and
+#  HMAC-SHA512) to read or alter anything.
+#
+#  V7 container layout
+#  ┌──────────────────────────────────────────────────────────────┐
+#  │ Header 74 B  magic(8) kdf_id(1) t(4) m_kib(4) p(1) salt(32)   │
+#  │              aes_iv_prefix(8) xcc_nonce_prefix(16)            │
+#  │ Meta   528 B XChaCha20-Poly1305(flags, filename, size) — the  │
+#  │              original name & file/folder type are hidden      │
+#  │ Chunks       [ct(≤4 MiB) + tag(16)] × N   (N ≥ 1)             │
+#  │ Trailer 64 B HMAC-SHA512(header ‖ meta ‖ all chunks)          │
+#  └──────────────────────────────────────────────────────────────┘
+#  Each chunk's AEAD binds SHA-512(header), its index and a
+#  "final chunk" flag, so chunks cannot be reordered, dropped,
+#  truncated or spliced in from another file.
+# ═══════════════════════════════════════════════════════════
+from Crypto.Cipher import ChaCha20_Poly1305
+from Crypto.Protocol.KDF import HKDF
+from Crypto.Hash import SHA512
+
+V7_KDF_ARGON2ID   = 0x01
+V7_HEADER_FMT     = '>8sBIIB'                       # magic, kdf_id, t, m_kib, p
+V7_HEADER_SIZE    = struct.calcsize(V7_HEADER_FMT) + V7_SALT_LEN + 8 + 16   # 74
+V7_META_PLAIN     = 512
+V7_TAG            = 16
+V7_META_SIZE      = V7_META_PLAIN + V7_TAG          # 528
+V7_MAC_SIZE       = 64
+V7_META_INDEX     = 0xFFFFFFFFFFFFFFFF              # nonce slot reserved for metadata
 
 
-def _cfg_decrypt(blob: bytes, key: bytes) -> bytes:
-    if len(blob) < 28:
-        raise ValueError("Config blob too short.")
-    nonce  = blob[:12]
-    tag    = blob[12:28]
-    ct     = blob[28:]
-    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-    return cipher.decrypt_and_verify(ct, tag)
+def _v7_build_header(t: int, m_kib: int, p: int, salt: bytes,
+                     aes_prefix: bytes, xcc_prefix: bytes) -> bytes:
+    return (struct.pack(V7_HEADER_FMT, MAGIC_V7, V7_KDF_ARGON2ID, t, m_kib, p)
+            + salt + aes_prefix + xcc_prefix)
+
+
+def _v7_parse_header(hdr: bytes) -> dict:
+    if len(hdr) != V7_HEADER_SIZE:
+        raise ValueError("File too short — corrupted V7 format.")
+    fixed = struct.calcsize(V7_HEADER_FMT)
+    magic, kdf_id, t, m_kib, p = struct.unpack(V7_HEADER_FMT, hdr[:fixed])
+    if magic != MAGIC_V7:
+        raise ValueError("Not a V7 file.")
+    if kdf_id != V7_KDF_ARGON2ID:
+        raise ValueError(f"Unsupported KDF id 0x{kdf_id:02x} in V7 file.")
+    # Refuse absurd parameters from an untrusted header (DoS protection);
+    # also refuse anything weaker than the legacy profile.
+    if not (1 <= t <= V7_KDF_LIMIT_TIME and 1 <= p <= V7_KDF_LIMIT_PAR
+            and ARGON2_MEM_KB <= m_kib <= V7_KDF_LIMIT_MEM and m_kib >= 8 * p):
+        raise ValueError("Invalid Argon2id parameters in V7 header — file corrupted or tampered.")
+    off = fixed
+    salt       = hdr[off:off + V7_SALT_LEN];  off += V7_SALT_LEN
+    aes_prefix = hdr[off:off + 8];            off += 8
+    xcc_prefix = hdr[off:off + 16]
+    return {"t": t, "m_kib": m_kib, "p": p, "salt": salt,
+            "aes_prefix": aes_prefix, "xcc_prefix": xcc_prefix}
+
+
+def _v7_derive_keys(pwd: bytes, hdr: bytes, info: dict) -> '_SecureKey':
+    """Returns a _SecureKey holding k_aes(0:32) ‖ k_xcc(32:64) ‖ k_mac(64:128)."""
+    if not _ARGON2_AVAILABLE:
+        raise RuntimeError("argon2-cffi not installed.\nRun:  pip install argon2-cffi")
+    master = hash_secret_raw(
+        secret=pwd, salt=info["salt"],
+        time_cost=info["t"], memory_cost=info["m_kib"],
+        parallelism=info["p"], hash_len=64,
+        type=Argon2Type.ID,
+    )
+    try:
+        subkeys = HKDF(master, 32, hashlib.sha512(hdr).digest(), SHA512,
+                       num_keys=4, context=b"enCPTO-v7 subkeys")
+        okm = b''.join(subkeys)
+        sk  = _SecureKey(okm)
+        _secure_zero_bytes(okm)
+        for k in subkeys:
+            _secure_zero_bytes(k)
+        return sk
+    finally:
+        _secure_zero_bytes(master)
+
+
+def _v7_xcc_nonce(xcc_prefix: bytes, idx: int) -> bytes:
+    return xcc_prefix + struct.pack('>Q', idx)        # 24-byte XChaCha20 nonce
+
+
+def _v7_aes_iv(aes_prefix: bytes, idx: int) -> bytes:
+    return aes_prefix + struct.pack('>I', idx)        # 12 bytes + 32-bit block counter
+
+
+def _v7_aad(hdr_hash: bytes, idx: int, final: bool) -> bytes:
+    return hdr_hash + struct.pack('>QB', idx, 1 if final else 0)
+
+
+def _aes_ctr_layer(data: bytes, key: bytes, iv12: bytes, use_gpu: bool) -> bytes:
+    """AES-256-CTR, counter block = iv12 ‖ 32-bit BE block index (same as GPU kernel)."""
+    if not data:
+        return b''
+    if use_gpu and GPU.available:
+        return GPU.process(data, key, iv12)
+    return AES.new(key, AES.MODE_CTR, nonce=iv12, initial_value=0).encrypt(data)
+
+
+def _v7_pack_meta(flags: int, name: str, size: int) -> bytes:
+    nb = name.encode('utf-8')[:MAX_EMBEDDED_NAME_BYTES]
+    nb = nb.decode('utf-8', errors='ignore').encode('utf-8')   # never cut a char in half
+    body = struct.pack('>BBH', 1, flags, len(nb)) + nb + struct.pack('>Q', size)
+    return body + b'\x00' * (V7_META_PLAIN - len(body))        # fixed size hides name length
+
+
+def _v7_unpack_meta(plain: bytes) -> dict:
+    ver, flags, name_len = struct.unpack('>BBH', plain[:4])
+    if ver != 1 or flags not in (FLAG_FILE, FLAG_ZIP) or name_len > MAX_EMBEDDED_NAME_BYTES:
+        raise ValueError("Unsupported V7 metadata.")
+    name = plain[4:4 + name_len].decode('utf-8', errors='replace')
+    size = struct.unpack('>Q', plain[4 + name_len:12 + name_len])[0]
+    return {"flags": flags, "name": name, "size": size}
+
+
+def _safe_output_name(name: str, fallback: str) -> str:
+    name = os.path.basename((name or "").replace('\\', '/'))
+    name = ''.join(c for c in name if c >= ' ' and c not in '<>:"|?*').strip().strip('.')
+    return name or fallback
+
+
+def _unique_path(path: str) -> str:
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    if os.path.isdir(path):
+        root, ext = path, ""
+    i = 1
+    while os.path.exists(f"{root} ({i}){ext}"):
+        i += 1
+    return f"{root} ({i}){ext}"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -689,11 +801,29 @@ def pack_directory_to_zip(dir_path: str, progress_cb=None) -> io.BytesIO:
 def unpack_zip_to_directory(zip_bytes: bytes, out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        root = os.path.realpath(out_dir)
         for member in zf.namelist():
             member_path = os.path.realpath(os.path.join(out_dir, member))
-            if not member_path.startswith(os.path.realpath(out_dir)):
+            if os.path.commonpath([root, member_path]) != root:
                 raise ValueError(f"Unsafe ZIP path detected: {member}")
         zf.extractall(out_dir)
+
+
+def restore_zip_as_folder(zip_bytes: bytes, target: str) -> str:
+    """Extracts a folder archive so that `target` IS the restored folder
+    (archives store '<folder>/...', which would otherwise nest it twice)."""
+    parent  = os.path.dirname(os.path.abspath(target))
+    staging = os.path.join(parent, f".encpto_extract_{secrets.token_hex(6)}")
+    try:
+        unpack_zip_to_directory(zip_bytes, staging)
+        entries = os.listdir(staging)
+        if len(entries) == 1 and os.path.isdir(os.path.join(staging, entries[0])):
+            os.replace(os.path.join(staging, entries[0]), target)
+        else:
+            os.replace(staging, target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return target
 
 
 def _is_zip_bytes(data: bytes) -> bool:
@@ -743,76 +873,79 @@ def secure_shred_directory(dir_path: str, progress_cb=None) -> None:
 
 
 # ═══════════════════════════════════════════════════════════
-#  Core encryption engine  (V6)
+#  Core encryption engine  (V7)
 # ═══════════════════════════════════════════════════════════
 
 def _encrypt_stream(source_stream, source_size, pwd, use_gpu, out_path,
                     flags=FLAG_FILE, progress_cb=None,
                     original_name: str = "") -> str:
-    salt       = get_random_bytes(ARGON2_SALT_LEN)
-    base_nonce = get_random_bytes(12)
-    with _kdf_argon2(pwd, salt) as sk:
-        aes_key  = sk.slice(0, 32)
-        hmac_key = sk.slice(32, 64)
-    mode = MODE_CTR if (use_gpu and GPU.available) else MODE_GCM
+    salt       = get_random_bytes(V7_SALT_LEN)
+    aes_prefix = get_random_bytes(8)
+    xcc_prefix = get_random_bytes(16)
+    hdr = _v7_build_header(V7_ARGON2_TIME, V7_ARGON2_MEM_KB, V7_ARGON2_PAR,
+                           salt, aes_prefix, xcc_prefix)
+    info = _v7_parse_header(hdr)
+    hdr_hash = hashlib.sha512(hdr).digest()
 
-    name_bytes = original_name.encode('utf-8')[:MAX_EMBEDDED_NAME_BYTES]
-    name_len   = len(name_bytes)
+    with _v7_derive_keys(pwd, hdr, info) as sk:
+        k_aes = sk.slice(0, 32)
+        k_xcc = sk.slice(32, 64)
+        k_mac = sk.slice(64, 128)
 
-    hdr_body = (MAGIC_V6
-                + bytes([mode])
-                + bytes([flags])
-                + struct.pack('>H', name_len)
-                + name_bytes
-                + salt
-                + base_nonce)
-
-    header_total = len(hdr_body) + 32
-
-    h = hmac_mod.new(hmac_key, hdr_body, hashlib.sha256)
-    bytes_done = 0
     _enc_ok = False
     try:
-        with open(out_path, 'w+b') as out_f:
-            out_f.write(b'\x00' * header_total)
-            chunk_idx = 0
+        mac = hmac_mod.new(k_mac, hdr, hashlib.sha512)
+
+        meta_plain = _v7_pack_meta(flags, original_name, source_size)
+        c = ChaCha20_Poly1305.new(key=k_xcc, nonce=_v7_xcc_nonce(xcc_prefix, V7_META_INDEX))
+        c.update(hdr_hash + b"meta")
+        meta_ct, meta_tag = c.encrypt_and_digest(meta_plain)
+        meta_blob = meta_ct + meta_tag
+        mac.update(meta_blob)
+
+        with open(out_path, 'wb') as out_f:
+            out_f.write(hdr)
+            out_f.write(meta_blob)
+
+            idx        = 0
+            bytes_done = 0
+            chunk      = source_stream.read(CHUNK_SIZE)
             while True:
-                chunk = source_stream.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                cn = _chunk_nonce(base_nonce, chunk_idx)
-                if mode == MODE_CTR:
-                    ct_section = (GPU.process(chunk, aes_key, cn)
-                                  if GPU.available
-                                  else cpu_ctr(chunk, aes_key, cn))
-                else:
-                    cipher = AES.new(aes_key, AES.MODE_GCM, nonce=cn)
-                    cipher.update(struct.pack('>Q', chunk_idx))
-                    ct, tag = cipher.encrypt_and_digest(chunk)
-                    ct_section = ct + tag
-                h.update(ct_section)
-                out_f.write(ct_section)
-                chunk_idx  += 1
+                nxt   = source_stream.read(CHUNK_SIZE) if chunk else b''
+                final = not nxt
+                if idx >= 0xFFFFFFFF:
+                    raise ValueError("Input too large for V7 container.")
+                # Layer 1: AES-256-CTR
+                stage1 = _aes_ctr_layer(chunk, k_aes, _v7_aes_iv(aes_prefix, idx), use_gpu)
+                # Layer 2: XChaCha20-Poly1305, bound to header / index / final flag
+                c = ChaCha20_Poly1305.new(key=k_xcc, nonce=_v7_xcc_nonce(xcc_prefix, idx))
+                c.update(_v7_aad(hdr_hash, idx, final))
+                ct, tag = c.encrypt_and_digest(stage1)
+                mac.update(ct)
+                mac.update(tag)
+                out_f.write(ct)
+                out_f.write(tag)
                 bytes_done += len(chunk)
+                idx += 1
                 if progress_cb:
-                    progress_cb(bytes_done, source_size)
-            final_mac = h.digest()
-            final_hdr = hdr_body + final_mac
-            out_f.seek(0)
-            out_f.write(final_hdr)
+                    progress_cb(bytes_done, max(source_size, 1))
+                if final:
+                    break
+                chunk = nxt
+
+            out_f.write(mac.digest())
             out_f.flush()
             os.fsync(out_f.fileno())
         _enc_ok = True
-    except BaseException:
+    finally:
         if not _enc_ok:
             try:
                 os.remove(out_path)
             except OSError:
                 pass
-        raise
-    finally:
-        _secure_zero_bytes(aes_key)
-        _secure_zero_bytes(hmac_key)
+        _secure_zero_bytes(k_aes)
+        _secure_zero_bytes(k_xcc)
+        _secure_zero_bytes(k_mac)
     return out_path
 
 
@@ -842,17 +975,156 @@ def do_encrypt_directory(dir_path, pwd, use_gpu, out_path, shred_after=False,
     return result
 
 
-def do_decrypt(in_path, pwd, out_path, progress_cb=None) -> str:
+def _decrypt_v7(in_path, pwd, out_dir, progress_cb=None, use_gpu=True) -> str:
+    """Decrypts a V7 container into out_dir, restoring the original name.
+    Returns the path of the restored file or folder."""
+    file_size = os.path.getsize(in_path)
+    min_size  = V7_HEADER_SIZE + V7_META_SIZE + V7_TAG + V7_MAC_SIZE
+    if file_size < min_size:
+        raise ValueError("File too short — corrupted V7 format.")
+    with open(in_path, 'rb') as f:
+        hdr       = f.read(V7_HEADER_SIZE)
+        meta_blob = f.read(V7_META_SIZE)
+        f.seek(file_size - V7_MAC_SIZE)
+        mac_stored = f.read(V7_MAC_SIZE)
+    info     = _v7_parse_header(hdr)
+    hdr_hash = hashlib.sha512(hdr).digest()
+    body_start = V7_HEADER_SIZE + V7_META_SIZE
+    body_size  = file_size - V7_MAC_SIZE - body_start
+
+    with _v7_derive_keys(pwd, hdr, info) as sk:
+        k_aes = sk.slice(0, 32)
+        k_xcc = sk.slice(32, 64)
+        k_mac = sk.slice(64, 128)
+
+    tmp_path_ = None
+    try:
+        # 1) Metadata — fails fast on a wrong password
+        try:
+            c = ChaCha20_Poly1305.new(key=k_xcc,
+                                      nonce=_v7_xcc_nonce(info["xcc_prefix"], V7_META_INDEX))
+            c.update(hdr_hash + b"meta")
+            meta = _v7_unpack_meta(c.decrypt_and_verify(meta_blob[:-V7_TAG], meta_blob[-V7_TAG:]))
+        except ValueError:
+            raise ValueError("Wrong password or file tampered (V7 metadata authentication failed).")
+
+        # 2) Full-file HMAC-SHA512 before any plaintext touches the disk
+        mac = hmac_mod.new(k_mac, hdr, hashlib.sha512)
+        mac.update(meta_blob)
+        with open(in_path, 'rb') as f:
+            f.seek(body_start)
+            remaining = body_size
+            while remaining > 0:
+                block = f.read(min(CHUNK_SIZE, remaining))
+                if not block:
+                    raise ValueError("Unexpected end of file — corrupted V7 format.")
+                mac.update(block)
+                remaining -= len(block)
+                if progress_cb:
+                    progress_cb(body_size - remaining, body_size * 2)
+        if not hmac_mod.compare_digest(mac.digest(), mac_stored):
+            raise ValueError("HMAC-SHA512 mismatch — wrong password or file tampered.")
+
+        # 3) Decrypt: XChaCha20-Poly1305 open → AES-256-CTR
+        is_zip   = meta["flags"] == FLAG_ZIP
+        fallback = os.path.splitext(os.path.basename(in_path))[0] or "decrypted"
+        target   = _unique_path(os.path.join(out_dir, _safe_output_name(meta["name"], fallback)))
+        sink     = io.BytesIO() if is_zip else None
+        if not is_zip:
+            tmp_path_ = _tmp_path(target)
+        written = 0
+        with open(in_path, 'rb') as f_in:
+            out_f = sink if is_zip else open(tmp_path_, 'wb')
+            try:
+                f_in.seek(body_start)
+                remaining = body_size
+                idx = 0
+                while remaining > 0:
+                    n = min(CHUNK_SIZE + V7_TAG, remaining)
+                    blob = f_in.read(n)
+                    if len(blob) != n:
+                        raise ValueError("Unexpected end of file — corrupted V7 format.")
+                    remaining -= n
+                    final = remaining == 0
+                    c = ChaCha20_Poly1305.new(key=k_xcc,
+                                              nonce=_v7_xcc_nonce(info["xcc_prefix"], idx))
+                    c.update(_v7_aad(hdr_hash, idx, final))
+                    stage1 = c.decrypt_and_verify(blob[:-V7_TAG], blob[-V7_TAG:])
+                    pt = _aes_ctr_layer(stage1, k_aes,
+                                        _v7_aes_iv(info["aes_prefix"], idx), use_gpu)
+                    out_f.write(pt)
+                    written += len(pt)
+                    idx += 1
+                    if progress_cb:
+                        progress_cb(body_size + (body_size - remaining), body_size * 2)
+                if written != meta["size"]:
+                    raise ValueError("Size mismatch — file truncated or tampered.")
+                if not is_zip:
+                    out_f.flush()
+                    os.fsync(out_f.fileno())
+            finally:
+                if not is_zip:
+                    out_f.close()
+
+        if is_zip:
+            zip_data = sink.getvalue()
+            sink.close()
+            if not _is_zip_bytes(zip_data):
+                raise ValueError("Decrypted payload is not a valid ZIP archive.")
+            restore_zip_as_folder(zip_data, target)
+            return target
+        os.replace(tmp_path_, target)
+        tmp_path_ = None
+        return target
+    finally:
+        if tmp_path_:
+            _remove_tmp(tmp_path_)
+        _secure_zero_bytes(k_aes)
+        _secure_zero_bytes(k_xcc)
+        _secure_zero_bytes(k_mac)
+
+
+def peek_container(dat_path: str) -> dict:
+    """Reads only what is visible without the password."""
+    with open(dat_path, 'rb') as f:
+        magic = f.read(8)
+    if magic == MAGIC_V7:
+        return {"version": 7, "name_hidden": True}
+    if magic == MAGIC_V6:
+        info = peek_v6_header(dat_path)
+        info["version"] = 6
+        return info
+    if magic == MAGIC_V4:
+        info = peek_v4_flags(dat_path)
+        info["version"] = 4
+        return info
+    if magic == MAGIC_V3:
+        return {"version": 3, "is_zip": False}
+    return {"version": 0, "is_zip": False}
+
+
+def do_decrypt(in_path, pwd, out_dir, progress_cb=None, use_gpu=True) -> str:
+    """Decrypts any supported container (V7, V6, V4, V3, V2, V1) into out_dir.
+    The original name is restored when the container carries one; an existing
+    file/folder with the same name is never overwritten."""
     with open(in_path, 'rb') as f:
         magic = f.read(8)
+    if magic == MAGIC_V7:
+        return _decrypt_v7(in_path, pwd, out_dir, progress_cb, use_gpu=use_gpu)
+
+    # Legacy formats: work out the output name first
+    info     = peek_container(in_path)
+    fallback = os.path.splitext(os.path.basename(in_path))[0] or "decrypted"
+    name     = _safe_output_name(info.get("original_name", ""), fallback)
+    target   = _unique_path(os.path.join(out_dir, name))
     if magic == MAGIC_V6:
-        return _decrypt_v6(in_path, pwd, out_path, progress_cb)
+        return _decrypt_v6(in_path, pwd, target, progress_cb)
     elif magic == MAGIC_V4:
-        return _decrypt_v4(in_path, pwd, out_path, progress_cb)
+        return _decrypt_v4(in_path, pwd, target, progress_cb)
     elif magic == MAGIC_V3:
-        return _decrypt_v3_compat(in_path, pwd, out_path, progress_cb)
+        return _decrypt_v3_compat(in_path, pwd, target, progress_cb)
     else:
-        return _decrypt_legacy(in_path, pwd, out_path)
+        return _decrypt_legacy(in_path, pwd, target)
 
 
 def _tmp_path(out_path: str) -> str:
@@ -906,10 +1178,7 @@ def _decrypt_v6(in_path, pwd, out_path, progress_cb=None) -> str:
         _secure_zero_bytes(hmac_key)
         raise ValueError("HMAC-SHA256 mismatch — wrong password or file tampered.")
 
-    if flags == FLAG_ZIP and original_name:
-        real_out = os.path.join(out_path, original_name)
-    else:
-        real_out = out_path
+    real_out = out_path   # do_decrypt() already resolved the restored name
 
     tmp_path_  = _tmp_path(real_out)
     bytes_done = 0
@@ -965,7 +1234,7 @@ def _decrypt_v6(in_path, pwd, out_path, progress_cb=None) -> str:
             plaintext_buf.close()
             if not _is_zip_bytes(zip_data):
                 raise ValueError("Decrypted payload is not a valid ZIP archive.")
-            unpack_zip_to_directory(zip_data, real_out)
+            restore_zip_as_folder(zip_data, real_out)
             return real_out
         os.replace(tmp_path_, real_out)
     except BaseException:
@@ -1101,7 +1370,7 @@ def _decrypt_v4(in_path, pwd, out_path, progress_cb=None) -> str:
             plaintext_buf.close()
             if not _is_zip_bytes(zip_data):
                 raise ValueError("Decrypted payload is not a valid ZIP archive.")
-            unpack_zip_to_directory(zip_data, out_path)
+            restore_zip_as_folder(zip_data, out_path)
             return out_path
         os.replace(tmp_path_, out_path)
     except BaseException:
@@ -1319,782 +1588,13 @@ def generate_password(length=20, use_upper=True, use_lower=True,
 
 
 # ═══════════════════════════════════════════════════════════
-#  Recovery Code Generator
-# ═══════════════════════════════════════════════════════════
-_RC_CHARSET = string.ascii_uppercase + string.digits
-
-def _generate_recovery_code() -> str:
-    charset = ''.join(c for c in _RC_CHARSET if c not in _AMBIGUOUS)
-    groups = [''.join(secrets.choice(charset) for _ in range(4)) for _ in range(4)]
-    return '-'.join(groups)
-
-def _generate_recovery_codes() -> list[str]:
-    return [_generate_recovery_code() for _ in range(RECOVERY_CODE_COUNT)]
-
-
-# ═══════════════════════════════════════════════════════════
-#  SecurityManager
-# ═══════════════════════════════════════════════════════════
-_CFG_MAGIC      = b"ENCPTOCFG1"
-_CFG_APP_CONST  = b"enCPTO_v5_security_config_2025"
-
-class SecurityManager:
-    def __init__(self):
-        self._cfg_key     = self._derive_config_key()
-        self._cfg: dict   = {}
-        self._initialized = False
-        self._load_config()
-
-    def _derive_config_key(self) -> bytes:
-        machine_id = self._get_machine_id()
-        from Crypto.Protocol.KDF import PBKDF2
-        salt = hashlib.sha256(_CFG_APP_CONST).digest()[:16]
-        key  = PBKDF2(machine_id + _CFG_APP_CONST, salt, dkLen=32, count=100_000)
-        return key
-
-    def _get_machine_id(self) -> bytes:
-        try:
-            if sys.platform == "linux":
-                with open("/etc/machine-id", 'rb') as f:
-                    return f.read().strip()
-            elif sys.platform == "darwin":
-                import subprocess
-                result = subprocess.run(
-                    ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-                    capture_output=True, text=True
-                )
-                for line in result.stdout.splitlines():
-                    if "IOPlatformUUID" in line:
-                        uuid = line.split('"')[-2]
-                        return uuid.encode()
-            elif sys.platform == "win32":
-                import subprocess
-                result = subprocess.run(
-                    ["wmic", "csproduct", "get", "UUID"],
-                    capture_output=True, text=True
-                )
-                lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
-                if len(lines) > 1:
-                    return lines[1].encode()
-        except Exception:
-            pass
-        import platform, getpass
-        fallback = platform.node() + getpass.getuser() + "enCPTO_v5_fallback"
-        return fallback.encode()
-
-    def _load_config(self):
-        if not os.path.exists(CONFIG_FILE):
-            self._cfg         = {}
-            self._initialized = False
-            return
-        try:
-            with open(CONFIG_FILE, 'rb') as f:
-                blob = f.read()
-            if not blob.startswith(_CFG_MAGIC):
-                self._cfg         = {}
-                self._initialized = False
-                return
-            encrypted  = blob[len(_CFG_MAGIC):]
-            json_bytes = _cfg_decrypt(encrypted, self._cfg_key)
-            self._cfg  = json.loads(json_bytes.decode('utf-8'))
-            self._initialized = True
-        except Exception:
-            self._cfg         = {}
-            self._initialized = False
-
-    def _save_config(self):
-        os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
-        json_bytes = json.dumps(self._cfg).encode('utf-8')
-        encrypted  = _cfg_encrypt(json_bytes, self._cfg_key)
-        tmp = CONFIG_FILE + ".tmp"
-        with open(tmp, 'wb') as f:
-            f.write(_CFG_MAGIC)
-            f.write(encrypted)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, CONFIG_FILE)
-        try:
-            os.chmod(CONFIG_FILE, 0o600)
-        except Exception:
-            pass
-
-    @property
-    def is_initialized(self) -> bool:
-        return self._initialized and bool(self._cfg)
-
-    def setup(self, pin: str) -> tuple[str, list[str]]:
-        if not _ARGON2_AVAILABLE:
-            raise RuntimeError("argon2-cffi is required for security setup.")
-        if not _PYOTP_AVAILABLE:
-            raise RuntimeError("pyotp is required for TOTP setup.\npip install pyotp")
-
-        pin_b    = pin.encode('utf-8')
-        pin_salt = get_random_bytes(ARGON2_SALT_LEN)
-        pin_hash = _kdf_argon2_pin(pin_b, pin_salt)
-        _secure_zero_bytes(pin_b)
-
-        totp_secret    = pyotp.random_base32()
-        recovery_codes = _generate_recovery_codes()
-
-        rc_hashed = []
-        for code in recovery_codes:
-            normalized = code.replace('-', '').upper()
-            h = hashlib.sha256(normalized.encode()).hexdigest()
-            rc_hashed.append({"hash": h, "used": False})
-
-        self._cfg = {
-            "pin_salt":       pin_salt.hex(),
-            "pin_hash":       pin_hash.hex(),
-            "totp_secret":    totp_secret,
-            "recovery_codes": rc_hashed,
-            "fail_count":     0,
-            "lockout_until":  0.0,
-        }
-        self._save_config()
-        self._initialized = True
-        _secure_zero_bytes(pin_hash)
-
-        totp_uri = pyotp.totp.TOTP(totp_secret).provisioning_uri(
-            name="enCPTO User",
-            issuer_name="enCPTO v6"
-        )
-        return totp_uri, recovery_codes
-
-    def is_locked_out(self) -> tuple[bool, float]:
-        until     = self._cfg.get("lockout_until", 0.0)
-        remaining = until - time.time()
-        if remaining > 0:
-            return True, remaining
-        return False, 0.0
-
-    def verify_pin(self, pin: str) -> bool:
-        locked, _ = self.is_locked_out()
-        if locked:
-            return False
-        pin_b = pin.encode('utf-8')
-        try:
-            pin_salt = bytes.fromhex(self._cfg["pin_salt"])
-            expected = bytes.fromhex(self._cfg["pin_hash"])
-            computed = _kdf_argon2_pin(pin_b, pin_salt)
-            ok       = hmac_mod.compare_digest(computed, expected)
-            _secure_zero_bytes(computed)
-        except Exception:
-            ok = False
-        finally:
-            _secure_zero_bytes(pin_b)
-
-        if ok:
-            self._cfg["fail_count"]    = 0
-            self._cfg["lockout_until"] = 0.0
-            self._save_config()
-            return True
-        else:
-            count = self._cfg.get("fail_count", 0) + 1
-            self._cfg["fail_count"] = count
-            if count >= MAX_PIN_ATTEMPTS:
-                self._cfg["lockout_until"] = time.time() + PIN_LOCKOUT_SECONDS
-                self._cfg["fail_count"]    = 0
-            self._save_config()
-            return False
-
-    def remaining_pin_attempts(self) -> int:
-        count = self._cfg.get("fail_count", 0)
-        return max(0, MAX_PIN_ATTEMPTS - count)
-
-    def verify_totp(self, code: str) -> bool:
-        if not _PYOTP_AVAILABLE:
-            return False
-        secret = self._cfg.get("totp_secret", "")
-        if not secret:
-            return False
-        totp = pyotp.TOTP(secret)
-        return totp.verify(code.strip(), valid_window=1)
-
-    def get_totp_secret(self) -> str:
-        return self._cfg.get("totp_secret", "")
-
-    def verify_recovery_code(self, code: str) -> bool:
-        normalized = code.replace('-', '').replace(' ', '').upper()
-        h     = hashlib.sha256(normalized.encode()).hexdigest()
-        codes = self._cfg.get("recovery_codes", [])
-        for entry in codes:
-            if not entry.get("used", False) and hmac_mod.compare_digest(entry["hash"], h):
-                entry["used"] = True
-                self._save_config()
-                return True
-        return False
-
-    def remaining_recovery_codes(self) -> int:
-        codes = self._cfg.get("recovery_codes", [])
-        return sum(1 for c in codes if not c.get("used", False))
-
-    def reset(self):
-        self._cfg         = {}
-        self._initialized = False
-        try:
-            secure_shred_file(CONFIG_FILE)
-        except Exception:
-            try:
-                os.remove(CONFIG_FILE)
-            except Exception:
-                pass
-
-
-security = SecurityManager()
-
-
-# ═══════════════════════════════════════════════════════════
-#  QR Code helper
-# ═══════════════════════════════════════════════════════════
-
-def _generate_qr_pixmap(uri: str, size: int = 280) -> QPixmap | None:
-    if not _QRCODE_AVAILABLE:
-        return None
-    try:
-        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L,
-                           box_size=4, border=2)
-        qr.add_data(uri)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        buf.seek(0)
-        qimg = QImage()
-        qimg.loadFromData(buf.getvalue(), 'PNG')
-        px = QPixmap.fromImage(qimg).scaled(size, size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation)
-        return px
-    except Exception:
-        return None
-
-
-# ═══════════════════════════════════════════════════════════
-#  Dialog: First-time Setup Wizard
-# ═══════════════════════════════════════════════════════════
-
-class SetupWizardDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("enCPTO v6 — 安全設定精靈 / Security Setup Wizard")
-        self.resize(600, 700)
-        self.setMinimumSize(500, 600)
-        self.setModal(True)
-        self._totp_uri       = ""
-        self._recovery_codes = []
-        self._setup_done     = False
-        self._build_ui()
-
-    def _build_ui(self):
-        self.setStyleSheet("""
-            QDialog { background: #1a1a2e; color: #e0e0e0; }
-            QLabel  { color: #e0e0e0; }
-            QLineEdit {
-                background: #16213e; color: #e0e0e0;
-                border: 1px solid #0f3460; border-radius: 4px;
-                padding: 6px; font-size: 13px;
-            }
-            QPushButton {
-                background: #0f3460; color: #e0e0e0;
-                border: none; border-radius: 4px;
-                padding: 8px 16px; font-weight: bold;
-            }
-            QPushButton:hover  { background: #1a4a80; }
-            QPushButton:pressed { background: #0a2040; }
-            QTextEdit {
-                background: #0d0d1a; color: #a0ffa0;
-                border: 1px solid #0f3460; border-radius: 4px;
-                font-family: Consolas, monospace; font-size: 12px;
-                padding: 6px;
-            }
-        """)
-
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setStyleSheet("QScrollArea { background: transparent; }")
-
-        self.container = QWidget()
-        layout = QVBoxLayout(self.container)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        title = QLabel("🔐  enCPTO v6 MFA 安全設定精靈")
-        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        title.setStyleSheet("color: #80cbc4; margin-bottom: 6px;")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #0f3460;")
-        layout.addWidget(sep)
-
-        step1_label = QLabel("步驟 1 / Step 1 — 設定 PIN 碼 (至少 6 位)")
-        step1_label.setFont(QFont("Arial", 11, QFont.Weight.Bold))
-        step1_label.setStyleSheet("color: #ffcc80;")
-        layout.addWidget(step1_label)
-
-        pin_row = QHBoxLayout()
-        self.pin_input   = QLineEdit()
-        self.pin_input.setPlaceholderText("輸入 PIN 碼 (6-20 位數字或字母)")
-        self.pin_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.pin_confirm = QLineEdit()
-        self.pin_confirm.setPlaceholderText("再次輸入 PIN 碼確認")
-        self.pin_confirm.setEchoMode(QLineEdit.EchoMode.Password)
-        pin_row.addWidget(self.pin_input)
-        pin_row.addWidget(self.pin_confirm)
-        layout.addLayout(pin_row)
-
-        self.pin_status = QLabel("")
-        self.pin_status.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(self.pin_status)
-        self.pin_input.textChanged.connect(self._check_pin)
-        self.pin_confirm.textChanged.connect(self._check_pin)
-
-        self.btn_generate_setup = QPushButton(
-            "⚡ 產生 TOTP 密鑰與救援碼 / Generate TOTP & Recovery Codes")
-        self.btn_generate_setup.setStyleSheet(
-            "QPushButton { background: #006064; font-size: 12px; padding: 10px; }"
-            "QPushButton:hover { background: #00838f; }"
-            "QPushButton:disabled { background: #333; color: #666; }"
-        )
-        self.btn_generate_setup.clicked.connect(self._do_generate)
-        self.btn_generate_setup.setEnabled(False)
-        layout.addWidget(self.btn_generate_setup)
-
-        step2_label = QLabel("步驟 2 / Step 2 — 掃描 QR Code 至 Google Authenticator / Authy")
-        step2_label.setFont(QFont("Arial", 11, QFont.Weight.Bold))
-        step2_label.setStyleSheet("color: #ffcc80;")
-        layout.addWidget(step2_label)
-
-        self.qr_label = QLabel("尚未產生 QR Code\n(請先完成步驟 1)")
-        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.qr_label.setMinimumHeight(200)
-        self.qr_label.setStyleSheet(
-            "background: #0d1117; border: 2px dashed #0f3460; border-radius: 4px; color: #666;")
-        layout.addWidget(self.qr_label)
-
-        self.totp_secret_label = QLabel("")
-        self.totp_secret_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.totp_secret_label.setStyleSheet(
-            "color: #80cbc4; font-family: Consolas, monospace; font-size: 11px;")
-        self.totp_secret_label.setWordWrap(True)
-        layout.addWidget(self.totp_secret_label)
-
-        step3_label = QLabel("步驟 3 / Step 3 — 抄寫並妥善保管救援碼 ⚠️ 僅顯示一次")
-        step3_label.setFont(QFont("Arial", 11, QFont.Weight.Bold))
-        step3_label.setStyleSheet("color: #f87171;")
-        layout.addWidget(step3_label)
-
-        self.recovery_display = QTextEdit()
-        self.recovery_display.setReadOnly(True)
-        self.recovery_display.setMaximumHeight(120)
-        self.recovery_display.setPlaceholderText(
-            "救援碼將在此顯示 / Recovery codes will appear here")
-        layout.addWidget(self.recovery_display)
-
-        warn_label = QLabel(
-            "⚠️  請將上方救援碼列印或抄寫後存放於安全、不與電腦相連的位置。\n"
-            "    These codes bypass TOTP. Store them offline, away from this device.")
-        warn_label.setStyleSheet(
-            "color: #fca5a5; font-size: 10px; background: #1a0a0a; "
-            "border: 1px solid #7f1d1d; border-radius: 3px; padding: 6px;")
-        warn_label.setWordWrap(True)
-        layout.addWidget(warn_label)
-
-        self.chk_confirm = QCheckBox(
-            "我已抄寫救援碼，並了解無法復原的風險 / I have saved recovery codes")
-        self.chk_confirm.setEnabled(False)
-        self.chk_confirm.setStyleSheet("color: #ccc; font-size: 11px;")
-        self.chk_confirm.stateChanged.connect(self._on_confirm_change)
-        layout.addWidget(self.chk_confirm)
-
-        self.btn_finish = QPushButton("✅ 完成設定 / Finish Setup")
-        self.btn_finish.setEnabled(False)
-        self.btn_finish.setStyleSheet(
-            "QPushButton { background: #1b5e20; font-size: 13px; font-weight: bold; padding: 10px; }"
-            "QPushButton:hover { background: #2e7d32; }"
-            "QPushButton:disabled { background: #333; color: #666; }"
-        )
-        self.btn_finish.clicked.connect(self.accept)
-        layout.addWidget(self.btn_finish)
-
-        self.scroll.setWidget(self.container)
-        main_layout.addWidget(self.scroll)
-
-    def _check_pin(self):
-        p1 = self.pin_input.text()
-        p2 = self.pin_confirm.text()
-        if len(p1) < 6:
-            self.pin_status.setText("PIN 太短，至少 6 碼")
-            self.pin_status.setStyleSheet("color: red; font-size: 11px;")
-            self.btn_generate_setup.setEnabled(False)
-        elif p1 != p2 and p2:
-            self.pin_status.setText("兩次輸入不一致")
-            self.pin_status.setStyleSheet("color: orange; font-size: 11px;")
-            self.btn_generate_setup.setEnabled(False)
-        elif p1 == p2 and len(p1) >= 6:
-            self.pin_status.setText("✅ PIN 符合要求")
-            self.pin_status.setStyleSheet("color: green; font-size: 11px;")
-            self.btn_generate_setup.setEnabled(True)
-        else:
-            self.pin_status.setText("")
-            self.btn_generate_setup.setEnabled(False)
-
-    def _do_generate(self):
-        pin = self.pin_input.text()
-        if not pin or len(pin) < 6:
-            return
-        try:
-            totp_uri, recovery_codes = security.setup(pin)
-            self._totp_uri       = totp_uri
-            self._recovery_codes = recovery_codes
-            self._setup_done     = True
-
-            px = _generate_qr_pixmap(totp_uri, size=240)
-            if px:
-                self.qr_label.setPixmap(px)
-                self.qr_label.setStyleSheet(
-                    "background: white; border: 2px solid #80cbc4; border-radius: 4px;")
-            else:
-                secret = security.get_totp_secret()
-                self.qr_label.setText(
-                    f"無法產生 QR Code (請安裝 qrcode + Pillow)\n\n"
-                    f"手動輸入 Secret:\n{secret}")
-
-            secret = security.get_totp_secret()
-            self.totp_secret_label.setText(f"手動輸入 Secret (備用): {secret}")
-
-            rc_text = "救援碼 / Recovery Codes (各僅可使用一次):\n\n"
-            for i, code in enumerate(recovery_codes, 1):
-                rc_text += f"  [{i}]  {code}\n"
-            self.recovery_display.setText(rc_text)
-
-            self.chk_confirm.setEnabled(True)
-            self.btn_generate_setup.setEnabled(False)
-            self.pin_input.setEnabled(False)
-            self.pin_confirm.setEnabled(False)
-
-        except Exception as e:
-            QMessageBox.critical(self, "設定失敗 / Setup Failed", str(e))
-
-    def _on_confirm_change(self, state):
-        self.btn_finish.setEnabled(state == Qt.CheckState.Checked.value)
-
-    def get_result(self) -> tuple[str, list[str]]:
-        return self._totp_uri, self._recovery_codes
-
-
-# ═══════════════════════════════════════════════════════════
-#  Dialog: PIN Entry
-# ═══════════════════════════════════════════════════════════
-
-class PinDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("enCPTO v6 — PIN 驗證 / PIN Verification")
-        self.setFixedSize(380, 280)
-        self.setModal(True)
-        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
-        self._verified      = False
-        self._lockout_timer = QTimer(self)
-        self._lockout_timer.timeout.connect(self._update_lockout)
-        self._build_ui()
-        self._update_status()
-
-    def _build_ui(self):
-        self.setStyleSheet("""
-            QDialog { background: #1a1a2e; color: #e0e0e0; }
-            QLabel  { color: #e0e0e0; }
-            QLineEdit {
-                background: #16213e; color: #e0e0e0;
-                border: 1px solid #0f3460; border-radius: 4px;
-                padding: 8px; font-size: 16px; letter-spacing: 2px;
-            }
-            QPushButton {
-                background: #0f3460; color: #e0e0e0;
-                border: none; border-radius: 4px;
-                padding: 10px; font-weight: bold; font-size: 13px;
-            }
-            QPushButton:hover   { background: #1a4a80; }
-            QPushButton:pressed { background: #0a2040; }
-        """)
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(24, 24, 24, 24)
-
-        icon_label = QLabel("🔒")
-        icon_label.setFont(QFont("Arial", 32))
-        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(icon_label)
-
-        title = QLabel("請輸入 PIN 碼以解鎖 enCPTO\nEnter PIN to unlock enCPTO")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("Arial", 11))
-        layout.addWidget(title)
-
-        self.pin_input = QLineEdit()
-        self.pin_input.setPlaceholderText("PIN")
-        self.pin_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.pin_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.pin_input.returnPressed.connect(self._verify)
-        layout.addWidget(self.pin_input)
-
-        self.status_label = QLabel("")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(self.status_label)
-
-        self.btn_verify = QPushButton("解鎖 / Unlock")
-        self.btn_verify.clicked.connect(self._verify)
-        layout.addWidget(self.btn_verify)
-
-        layout.addStretch()
-
-    def _update_status(self):
-        locked, remaining = security.is_locked_out()
-        if locked:
-            self.pin_input.setEnabled(False)
-            self.btn_verify.setEnabled(False)
-            self.status_label.setText(
-                f"🔒 已鎖定 {remaining:.0f} 秒 / Locked for {remaining:.0f}s")
-            self.status_label.setStyleSheet("color: #f87171;")
-            self._lockout_timer.start(1000)
-        else:
-            self._lockout_timer.stop()
-            self.pin_input.setEnabled(True)
-            self.btn_verify.setEnabled(True)
-            attempts = security.remaining_pin_attempts()
-            if attempts < MAX_PIN_ATTEMPTS:
-                self.status_label.setText(
-                    f"⚠️  剩餘嘗試次數: {attempts} / Remaining attempts: {attempts}")
-                self.status_label.setStyleSheet("color: orange;")
-            else:
-                self.status_label.setText(
-                    f"剩餘嘗試次數: {MAX_PIN_ATTEMPTS} 次 / {MAX_PIN_ATTEMPTS} attempts")
-                self.status_label.setStyleSheet("color: gray; font-size: 11px;")
-
-    def _update_lockout(self):
-        locked, remaining = security.is_locked_out()
-        if locked:
-            self.status_label.setText(
-                f"🔒 已鎖定 {remaining:.0f} 秒 / Locked for {remaining:.0f}s")
-        else:
-            self._lockout_timer.stop()
-            self._update_status()
-
-    def _verify(self):
-        locked, _ = security.is_locked_out()
-        if locked:
-            return
-        pin = self.pin_input.text()
-        if not pin:
-            return
-        pin_bytes = pin.encode('utf-8')
-        ok        = security.verify_pin(pin)
-        _secure_zero_bytes(pin_bytes)
-        self.pin_input.clear()
-
-        if ok:
-            self._verified = True
-            self.accept()
-        else:
-            self._update_status()
-            locked_now, _ = security.is_locked_out()
-            if locked_now:
-                QMessageBox.warning(self, "已鎖定 / Locked",
-                    f"PIN 錯誤次數過多，已鎖定 {PIN_LOCKOUT_SECONDS} 秒。\n"
-                    f"Too many failed attempts. Locked for {PIN_LOCKOUT_SECONDS}s.")
-            else:
-                remain = security.remaining_pin_attempts()
-                self.status_label.setText(
-                    f"❌ PIN 錯誤，剩餘 {remain} 次 / Wrong PIN, {remain} tries left")
-                self.status_label.setStyleSheet("color: #f87171;")
-
-    @property
-    def verified(self) -> bool:
-        return self._verified
-
-    def closeEvent(self, event):
-        if not self._verified:
-            event.ignore()
-
-
-# ═══════════════════════════════════════════════════════════
-#  Dialog: TOTP Verification
-# ═══════════════════════════════════════════════════════════
-
-class TOTPDialog(QDialog):
-    def __init__(self, operation: str = "", parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("enCPTO v6 — TOTP 驗證 / TOTP Verification")
-        self.setFixedSize(450, 350)
-        self.setModal(True)
-        self._verified  = False
-        self._operation = operation
-        self._build_ui()
-
-    def _build_ui(self):
-        self.setStyleSheet("""
-            QDialog { background: #1a1a2e; color: #e0e0e0; }
-            QLabel  { color: #e0e0e0; }
-            QLineEdit {
-                background: #16213e; color: #80cbc4;
-                border: 1px solid #0f3460; border-radius: 4px;
-                padding: 10px; font-size: 24px; letter-spacing: 6px;
-                text-align: center;
-            }
-            QPushButton {
-                background: #0f3460; color: #e0e0e0;
-                border: none; border-radius: 4px;
-                padding: 10px; font-weight: bold; font-size: 13px;
-            }
-            QPushButton:hover   { background: #1a4a80; }
-        """)
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(24, 24, 24, 24)
-
-        icon = QLabel("🔐")
-        icon.setFont(QFont("Arial", 28))
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(icon)
-
-        op_text = f"操作: {self._operation}" if self._operation else ""
-        title   = QLabel(
-            f"請輸入驗證器 6 位數碼以確認操作\n"
-            f"Enter 6-digit TOTP code to confirm\n{op_text}"
-        )
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("Arial", 10))
-        layout.addWidget(title)
-
-        self.totp_input = QLineEdit()
-        self.totp_input.setPlaceholderText("000000")
-        self.totp_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.totp_input.setMaxLength(6)
-        self.totp_input.returnPressed.connect(self._verify)
-        layout.addWidget(self.totp_input)
-
-        self.status_label = QLabel("")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(self.status_label)
-
-        btn_row    = QHBoxLayout()
-        self.btn_verify = QPushButton("✅ 驗證 / Verify")
-        self.btn_verify.clicked.connect(self._verify)
-        btn_cancel = QPushButton("❌ 取消 / Cancel")
-        btn_cancel.setStyleSheet(
-            "QPushButton { background: #4a1010; }"
-            "QPushButton:hover { background: #6a1515; }")
-        btn_cancel.clicked.connect(self.reject)
-        btn_row.addWidget(self.btn_verify)
-        btn_row.addWidget(btn_cancel)
-        layout.addLayout(btn_row)
-
-        self.btn_use_recovery = QPushButton(
-            f"🆘 使用救援碼 / Use Recovery Code  "
-            f"(剩餘 {security.remaining_recovery_codes()} 組)")
-        self.btn_use_recovery.setStyleSheet(
-            "QPushButton { background: #3d1f00; color: #ffa07a; font-size: 11px; }"
-            "QPushButton:hover { background: #5a2e00; }")
-        self.btn_use_recovery.clicked.connect(self._use_recovery)
-        layout.addWidget(self.btn_use_recovery)
-
-    def _verify(self):
-        code = self.totp_input.text().strip()
-        if len(code) != 6 or not code.isdigit():
-            self.status_label.setText("請輸入 6 位數字 / Enter 6 digits")
-            self.status_label.setStyleSheet("color: orange;")
-            return
-        if security.verify_totp(code):
-            self._verified = True
-            self.accept()
-        else:
-            self.totp_input.clear()
-            self.status_label.setText("❌ 驗證碼錯誤或已過期 / Invalid or expired code")
-            self.status_label.setStyleSheet("color: #f87171;")
-
-    def _use_recovery(self):
-        code, ok = _input_dialog_secure(
-            self,
-            "使用救援碼 / Use Recovery Code",
-            "請輸入救援碼 (格式: XXXX-XXXX-XXXX-XXXX)\nEnter recovery code:"
-        )
-        if not ok or not code:
-            return
-        if security.verify_recovery_code(code):
-            remaining = security.remaining_recovery_codes()
-            QMessageBox.information(
-                self, "救援碼有效 / Recovery Code Valid",
-                f"✅ 救援碼已接受並標記為已使用。\n"
-                f"剩餘可用救援碼: {remaining} 組\n\n"
-                f"Recovery code accepted and marked as used.\n"
-                f"Remaining codes: {remaining}"
-            )
-            self._verified = True
-            self.accept()
-        else:
-            QMessageBox.warning(
-                self, "無效救援碼 / Invalid Recovery Code",
-                "此救援碼無效或已被使用。\nThis code is invalid or already used."
-            )
-
-    @property
-    def verified(self) -> bool:
-        return self._verified
-
-
-def _input_dialog_secure(parent, title: str, prompt: str) -> tuple[str, bool]:
-    dlg = QDialog(parent)
-    dlg.setWindowTitle(title)
-    dlg.setFixedSize(420, 160)
-    dlg.setStyleSheet("""
-        QDialog { background: #1a1a2e; color: #e0e0e0; }
-        QLabel  { color: #e0e0e0; }
-        QLineEdit {
-            background: #16213e; color: #80cbc4;
-            border: 1px solid #0f3460; border-radius: 4px;
-            padding: 8px; font-size: 13px; font-family: Consolas, monospace;
-        }
-        QPushButton {
-            background: #0f3460; color: #e0e0e0;
-            border: none; border-radius: 4px; padding: 8px 16px; font-weight: bold;
-        }
-        QPushButton:hover { background: #1a4a80; }
-    """)
-    layout = QVBoxLayout(dlg)
-    layout.setContentsMargins(16, 16, 16, 16)
-    layout.addWidget(QLabel(prompt))
-    edit = QLineEdit()
-    edit.setEchoMode(QLineEdit.EchoMode.Password)
-    layout.addWidget(edit)
-    btns = QDialogButtonBox(
-        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-    btns.accepted.connect(dlg.accept)
-    btns.rejected.connect(dlg.reject)
-    layout.addWidget(btns)
-    result = dlg.exec()
-    text   = edit.text()
-    edit.clear()
-    return text, result == QDialog.DialogCode.Accepted
-
-
-# ═══════════════════════════════════════════════════════════
 #  Language strings
 # ═══════════════════════════════════════════════════════════
 LANGUAGES = {
     "TW": {
-        "app_title":            "enCPTO v6.2 - Argon2id + AES-256 + HMAC-SHA256 + MFA + GPU + 設定頁面",
+        "app_title":            "enCPTO v7.0 - Argon2id + AES-256 ⊕ XChaCha20-Poly1305 + HMAC-SHA512",
         "btn_lang":             "🌐 Switch to English",
-        "title_label":          "軍規級雙層加密工具 v6.2",
+        "title_label":          "軍規級雙層加密工具 v7.0",
         "tab_main":             "🔐 加密 / 解密",
         "tab_settings":         "⚙ 設定",
         "btn_select_input":     "📂 選擇檔案",
@@ -2114,20 +1614,21 @@ LANGUAGES = {
         "shred_warn_title":     "⚠️ 不可逆操作確認",
         "shred_warn_body":      ("您即將永久銷毀原始檔案！\n\n"
                                  "三階段覆寫 (0x00 → 0xFF → 亂數) 後無法還原。\n\n確定要繼續嗎？"),
-        "btn_encrypt":          "🔥 加密 (Argon2id + AES-256 + HMAC)",
+        "btn_encrypt":          "🔥 加密 (AES-256 ⊕ XChaCha20 雙層)",
         "btn_decrypt":          "🔑 解密還原",
         "preview_title":        "檔案預覽",
         "preview_drop":         "請將檔案或資料夾拖放到此處\n或點擊左側選擇",
         "preview_enc":          "[ 已加密的 DAT 檔案 ]\n內容無法預覽",
-        "preview_enc_v6":       "[ V6 加密檔案 ]\n原始檔名: {0}\n內容無法預覽",
+        "preview_enc_v6":       "[ V6 加密檔案 (舊格式) ]\n原始檔名: {0}\n內容無法預覽",
+        "preview_enc_v7":       "[ V7 加密檔案 ]\n檔名與類型已加密隱藏\n輸入密碼後解密即可還原",
         "preview_dir":          "[ 資料夾已選取 ]\n{0}\n共 {1} 個檔案，約 {2}",
         "preview_unk":          "[ 不支援預覽的檔案格式 ]\n{0}",
-        "status_ready":         "就緒。  MFA: ✅ 已啟用  |  V6 格式 (自動嵌入檔名)",
+        "status_ready":         "就緒。  V7 格式：AES-256 ⊕ XChaCha20-Poly1305 + HMAC-SHA512 (檔名加密)",
         "status_zip_run":       "⏳ 打包資料夾中…",
-        "status_enc_run":       "⏳ Argon2id 金鑰推導 + AES-256 加密中…",
+        "status_enc_run":       "⏳ Argon2id 金鑰推導 + 雙層加密中…",
         "status_enc_ok":        "加密完成！",
         "status_enc_fail":      "加密失敗。",
-        "status_dec_run":       "⏳ 驗證 HMAC 與解密中…",
+        "status_dec_run":       "⏳ 驗證完整性 (HMAC-SHA512) 與解密中…",
         "status_dec_ok":        "解密成功！",
         "status_dec_fail":      "解密失敗。",
         "msg_warn":             "警告",
@@ -2140,11 +1641,10 @@ LANGUAGES = {
         "err_no_pwd":           "請輸入解密金鑰。",
         "err_wrong_pwd":        "解密失敗！密碼錯誤、HMAC 不符，或檔案已遭竄改。",
         "err_no_argon2":        "請先安裝 argon2-cffi：\npip install argon2-cffi",
-        "err_totp_cancel":      "操作已取消：未通過 TOTP 驗證。",
-        "succ_enc":             "檔案已使用 Argon2id + AES-256 + HMAC-SHA256 保護！\n儲存至：{0}",
+        "succ_enc":             "檔案已使用 Argon2id + AES-256 ⊕ XChaCha20-Poly1305 + HMAC-SHA512 保護！\n儲存至：{0}",
         "succ_enc_dir":         "資料夾已打包加密！\n儲存至：{0}",
-        "succ_dec":             "解密成功！\n儲存至：{0}",
-        "succ_dec_dir":         "ZIP 已解密並還原至：\n{0}",
+        "succ_dec":             "解密成功！已還原為：\n{0}",
+        "succ_dec_dir":         "資料夾已解密並還原至：\n{0}",
         # Settings tab
         "sect_appearance":      "🎨 外觀",
         "theme_label":          "主題:",
@@ -2162,10 +1662,10 @@ LANGUAGES = {
         "sect_gpu":             "⚡ GPU 加速 (OpenCL)",
         "gpu_found":            "✅ 已偵測到 GPU: {0}",
         "gpu_none":             "❌ 未偵測到 GPU (需安裝 pyopencl + numpy)",
-        "chk_gpu":              "啟用 GPU 加速 (AES-256-CTR on GPU)",
-        "gpu_mode_on":          "模式: AES-256-CTR + HMAC [GPU ⚡] + Argon2id",
-        "gpu_mode_off":         "模式: AES-256-GCM + HMAC [CPU] + Argon2id",
-        "kdf_label":            "KDF: Argon2id (t=3, m=64MB, p=4)",
+        "chk_gpu":              "啟用 GPU 加速 (第一層 AES-256-CTR 於 GPU 執行)",
+        "gpu_mode_on":          "模式: AES-256-CTR [GPU ⚡] → XChaCha20-Poly1305 → HMAC-SHA512",
+        "gpu_mode_off":         "模式: AES-256-CTR [CPU] → XChaCha20-Poly1305 → HMAC-SHA512",
+        "kdf_label":            "KDF: Argon2id (t=4, m=256MB, p=4) + HKDF-SHA512 子金鑰",
         "chunk_label":          "分塊: 4 MB/區塊  |  安全歸零: ctypes + mmap",
         "sect_shred":           "🗑 安全粉碎 (DoD 5220.22-M)",
         "shred_desc":           "加密/解密後粉碎來源檔案 (三階段覆寫，不可逆)",
@@ -2180,17 +1680,11 @@ LANGUAGES = {
         "btn_copy_pwd":         "📋 複製至密碼欄",
         "gen_copied":           "密碼已複製到主介面密碼欄！",
         "gen_err_pool":         "請至少勾選一個字元集。",
-        "sect_mfa":             "🔐 MFA 狀態",
-        "mfa_status_ok":        "✅ MFA 已啟用 (PIN + TOTP)",
-        "mfa_rc_remain":        "救援碼剩餘: {0} 組",
-        "btn_reset_mfa":        "⚙️ 重設 MFA (危險操作)",
-        "mfa_reset_warn":       ("⚠️ 重設 MFA 將清除所有 PIN、TOTP 設定與救援碼！\n\n"
-                                 "下次啟動需重新完成設定精靈。\n確定要繼續嗎？"),
     },
     "EN": {
-        "app_title":            "enCPTO v6.2 - Argon2id + AES-256 + HMAC-SHA256 + MFA + GPU + Settings",
+        "app_title":            "enCPTO v7.0 - Argon2id + AES-256 ⊕ XChaCha20-Poly1305 + HMAC-SHA512",
         "btn_lang":             "🌐 切換至中文",
-        "title_label":          "Military-Grade Dual-Layer Encryption v6.2",
+        "title_label":          "Military-Grade Dual-Layer Encryption v7.0",
         "tab_main":             "🔐 Encrypt / Decrypt",
         "tab_settings":         "⚙ Settings",
         "btn_select_input":     "📂 Select File",
@@ -2210,20 +1704,21 @@ LANGUAGES = {
         "shred_warn_title":     "⚠️ Irreversible Operation",
         "shred_warn_body":      ("You are about to permanently destroy the source file(s)!\n\n"
                                  "Three-pass overwrite makes recovery impossible.\n\nContinue?"),
-        "btn_encrypt":          "🔥 Encrypt (Argon2id + AES-256 + HMAC)",
+        "btn_encrypt":          "🔥 Encrypt (AES-256 ⊕ XChaCha20 dual-layer)",
         "btn_decrypt":          "🔑 Decrypt File",
         "preview_title":        "File Preview",
         "preview_drop":         "Drag & Drop file or folder here\nor click select button",
         "preview_enc":          "[ Encrypted DAT File ]\nPreview unavailable",
-        "preview_enc_v6":       "[ V6 Encrypted File ]\nOriginal filename: {0}\nPreview unavailable",
+        "preview_enc_v6":       "[ V6 Encrypted File (legacy) ]\nOriginal filename: {0}\nPreview unavailable",
+        "preview_enc_v7":       "[ V7 Encrypted File ]\nFilename and type are encrypted\nDecrypt with your password to restore",
         "preview_dir":          "[ Folder Selected ]\n{0}\n{1} files, approx. {2}",
         "preview_unk":          "[ Unsupported Preview Format ]\n{0}",
-        "status_ready":         "Ready.  MFA: ✅ Enabled  |  Format: V6 (auto filename embed)",
+        "status_ready":         "Ready.  Format V7: AES-256 ⊕ XChaCha20-Poly1305 + HMAC-SHA512 (encrypted filename)",
         "status_zip_run":       "⏳ Packing folder into ZIP stream…",
-        "status_enc_run":       "⏳ Argon2id key derivation + AES-256 encryption…",
+        "status_enc_run":       "⏳ Argon2id key derivation + dual-layer encryption…",
         "status_enc_ok":        "Encryption complete!",
         "status_enc_fail":      "Encryption failed.",
-        "status_dec_run":       "⏳ Verifying HMAC and decrypting…",
+        "status_dec_run":       "⏳ Verifying integrity (HMAC-SHA512) and decrypting…",
         "status_dec_ok":        "Decryption complete!",
         "status_dec_fail":      "Decryption failed.",
         "msg_warn":             "Warning",
@@ -2236,11 +1731,10 @@ LANGUAGES = {
         "err_no_pwd":           "Please enter the decryption key.",
         "err_wrong_pwd":        "Decryption failed!\nWrong password, HMAC mismatch, or tampered file.",
         "err_no_argon2":        "Please install argon2-cffi first:\npip install argon2-cffi",
-        "err_totp_cancel":      "Operation cancelled: TOTP verification failed.",
-        "succ_enc":             "File secured with Argon2id + AES-256 + HMAC-SHA256!\nSaved to: {0}",
+        "succ_enc":             "File secured with Argon2id + AES-256 ⊕ XChaCha20-Poly1305 + HMAC-SHA512!\nSaved to: {0}",
         "succ_enc_dir":         "Folder packed and encrypted!\nSaved to: {0}",
-        "succ_dec":             "File decrypted!\nSaved to: {0}",
-        "succ_dec_dir":         "ZIP decrypted and extracted to:\n{0}",
+        "succ_dec":             "File decrypted and restored as:\n{0}",
+        "succ_dec_dir":         "Folder decrypted and restored to:\n{0}",
         # Settings tab
         "sect_appearance":      "🎨 Appearance",
         "theme_label":          "Theme:",
@@ -2258,10 +1752,10 @@ LANGUAGES = {
         "sect_gpu":             "⚡ GPU Booster (OpenCL)",
         "gpu_found":            "✅ GPU detected: {0}",
         "gpu_none":             "❌ No GPU found (install pyopencl + numpy)",
-        "chk_gpu":              "Enable GPU Acceleration (AES-256-CTR on GPU)",
-        "gpu_mode_on":          "Mode: AES-256-CTR + HMAC [GPU ⚡] + Argon2id",
-        "gpu_mode_off":         "Mode: AES-256-GCM + HMAC [CPU] + Argon2id",
-        "kdf_label":            "KDF: Argon2id (t=3, m=64MB, p=4)",
+        "chk_gpu":              "Enable GPU Acceleration (layer-1 AES-256-CTR on GPU)",
+        "gpu_mode_on":          "Mode: AES-256-CTR [GPU ⚡] → XChaCha20-Poly1305 → HMAC-SHA512",
+        "gpu_mode_off":         "Mode: AES-256-CTR [CPU] → XChaCha20-Poly1305 → HMAC-SHA512",
+        "kdf_label":            "KDF: Argon2id (t=4, m=256MB, p=4) + HKDF-SHA512 subkeys",
         "chunk_label":          "Chunk: 4 MB/block  |  Secure wipe: ctypes + mmap",
         "sect_shred":           "🗑 Secure Shredder (DoD 5220.22-M)",
         "shred_desc":           "Shred source files after encrypt/decrypt (3-pass overwrite, irreversible)",
@@ -2276,12 +1770,6 @@ LANGUAGES = {
         "btn_copy_pwd":         "📋 Copy to Password Field",
         "gen_copied":           "Password copied to the main password field!",
         "gen_err_pool":         "Please select at least one character set.",
-        "sect_mfa":             "🔐 MFA Status",
-        "mfa_status_ok":        "✅ MFA Active (PIN + TOTP)",
-        "mfa_rc_remain":        "Recovery codes remaining: {0}",
-        "btn_reset_mfa":        "⚙️ Reset MFA (Dangerous)",
-        "mfa_reset_warn":       ("⚠️ Resetting MFA will erase all PIN, TOTP settings and recovery codes!\n\n"
-                                 "You will need to complete setup again on next launch.\nContinue?"),
     },
 }
 
@@ -2623,11 +2111,6 @@ class CryptoApp(QMainWindow):
         self.progress_bar.setVisible(busy)
         if not busy:
             self.progress_bar.setValue(0)
-
-    def _require_totp(self, operation: str) -> bool:
-        dlg = TOTPDialog(operation=operation, parent=self)
-        dlg.exec()
-        return dlg.verified
 
     # ── UI construction ──────────────────────────────────────
 
@@ -2984,28 +2467,6 @@ class CryptoApp(QMainWindow):
         gen_lay.addWidget(self.btn_generate)
         sv.addWidget(self._sect_gen)
 
-        # ── MFA ──────────────────────────────────────────────
-        self._sect_mfa = QGroupBox()
-        mfa_lay = QVBoxLayout(self._sect_mfa)
-        mfa_lay.setContentsMargins(10, 16, 10, 10)
-        mfa_lay.setSpacing(4)
-
-        self.mfa_status_label = QLabel()
-        self.mfa_rc_label = QLabel()
-        self.mfa_rc_label.setStyleSheet("font-size:10px;background:transparent;")
-        self.btn_reset_mfa = QPushButton()
-        self.btn_reset_mfa.setFixedHeight(28)
-        self.btn_reset_mfa.setStyleSheet(
-            "QPushButton{background:#4a1010;color:#fca5a5;font-size:11px;"
-            "border:1px solid #7f1d1d;border-radius:3px;}"
-            "QPushButton:hover{background:#6a1515;}")
-        self.btn_reset_mfa.clicked.connect(self._reset_mfa)
-
-        mfa_lay.addWidget(self.mfa_status_label)
-        mfa_lay.addWidget(self.mfa_rc_label)
-        mfa_lay.addWidget(self.btn_reset_mfa)
-        sv.addWidget(self._sect_mfa)
-
         sv.addStretch()
         settings_scroll.setWidget(sw)
         self.tabs.addTab(settings_scroll, "")
@@ -3095,21 +2556,6 @@ class CryptoApp(QMainWindow):
         self.status_bar.showMessage(self.gt("gen_copied"), 3000)
         self.tabs.setCurrentIndex(0)
 
-    def _reset_mfa(self):
-        result = QMessageBox.warning(
-            self,
-            self.gt("btn_reset_mfa"),
-            self.gt("mfa_reset_warn"),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if result == QMessageBox.StandardButton.Yes:
-            security.reset()
-            QMessageBox.information(self, "MFA Reset",
-                "MFA 設定已清除。請重新啟動程式完成設定。\n"
-                "MFA settings cleared. Please restart to complete setup.")
-            QApplication.quit()
-
     # ── Language ─────────────────────────────────────────────
 
     def toggle_language(self):
@@ -3174,12 +2620,6 @@ class CryptoApp(QMainWindow):
         self.btn_copy_pwd.setText(self.gt("btn_copy_pwd"))
         self._on_gen_slider(self.gen_slider.value())
 
-        self._sect_mfa.setTitle(self.gt("sect_mfa"))
-        self.mfa_status_label.setText(self.gt("mfa_status_ok"))
-        self.mfa_rc_label.setText(
-            self.gt("mfa_rc_remain", security.remaining_recovery_codes()))
-        self.btn_reset_mfa.setText(self.gt("btn_reset_mfa"))
-
         self._refresh_input_label()
         self.output_label.setText(
             self.gt("out_empty") if not self.output_file_path
@@ -3210,7 +2650,7 @@ class CryptoApp(QMainWindow):
         if len(pwd) < 8:
             return False
         cats = sum([bool(re.search(r"[a-z]", pwd)), bool(re.search(r"[A-Z]", pwd)),
-                    bool(re.search(r"\d",    pwd)), bool(re.search(r'[!@#$%^&*(),.?\":{}|<>]', pwd))])
+                    bool(re.search(r"\d",    pwd)), bool(re.search(r"[^A-Za-z0-9]", pwd))])
         return cats >= 3
 
     def check_password_strength(self, text: str):
@@ -3269,8 +2709,13 @@ class CryptoApp(QMainWindow):
             self.preview_stack.setCurrentIndex(0)
             self.image_preview.clear()
             try:
-                info = peek_v6_header(fp)
-                self.image_preview.setText(self.gt("preview_enc_v6", info["original_name"]))
+                info = peek_container(fp)
+                if info["version"] == 7:
+                    self.image_preview.setText(self.gt("preview_enc_v7"))
+                elif info["version"] == 6:
+                    self.image_preview.setText(self.gt("preview_enc_v6", info["original_name"]))
+                else:
+                    self.image_preview.setText(self.gt("preview_enc"))
             except Exception:
                 self.image_preview.setText(self.gt("preview_enc"))
 
@@ -3355,10 +2800,6 @@ class CryptoApp(QMainWindow):
         if not self.select_output_file(".dat"):
             return
 
-        if not self._require_totp("加密 / Encrypt"):
-            QMessageBox.warning(self, self.gt("msg_warn"), self.gt("err_totp_cancel"))
-            return
-
         shred_after = self.chk_shred.isChecked()
         if shred_after:
             res = QMessageBox.warning(
@@ -3440,49 +2881,35 @@ class CryptoApp(QMainWindow):
             QMessageBox.warning(self, self.gt("msg_warn"), self.gt("err_no_pwd"))
             return
 
-        is_zip_archive = False
-        suggested_name = ""
-        try:
-            with open(self.input_file_path, 'rb') as f:
-                magic = f.read(8)
-            if magic == MAGIC_V6:
-                info = peek_v6_header(self.input_file_path)
-                is_zip_archive = info["is_zip"]
-                suggested_name = info["original_name"]
-            elif magic == MAGIC_V4:
-                info           = peek_v4_flags(self.input_file_path)
-                is_zip_archive = info["is_zip"]
-        except Exception:
-            pass
-
-        if is_zip_archive:
-            if not self.select_output_directory():
-                return
-        else:
-            if not self.select_output_file("", suggested_name=suggested_name):
-                return
-
-        if not self._require_totp("解密 / Decrypt"):
-            QMessageBox.warning(self, self.gt("msg_warn"), self.gt("err_totp_cancel"))
+        # Every format is restored into a folder you pick, under its original
+        # name (V7 keeps the name encrypted until the password is verified).
+        if not self.select_output_directory():
             return
 
         in_path  = self.input_file_path
-        out_path = self.output_file_path
+        out_dir  = self.output_file_path
         pwd_b    = pwd.encode('utf-8')
+        use_gpu  = GPU.available and self.chk_gpu.isChecked()
 
         self.status_bar.showMessage(self.gt("status_dec_run"))
         self._set_busy(True)
 
         def task():
-            return do_decrypt(in_path, pwd_b, out_path,
-                              progress_cb=self._make_progress_cb())
+            return do_decrypt(in_path, pwd_b, out_dir,
+                              progress_cb=self._make_progress_cb(),
+                              use_gpu=use_gpu)
 
         self._worker = CryptoWorker(task)
-        self._worker.finished.connect(
-            self._on_dec_dir_done if is_zip_archive else self._on_dec_done)
+        self._worker.finished.connect(self._on_dec_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.progress.connect(self.progress_bar.setValue)
         self._worker.start()
+
+    def _on_dec_finished(self, out_path: str):
+        if os.path.isdir(out_path):
+            self._on_dec_dir_done(out_path)
+        else:
+            self._on_dec_done(out_path)
 
     def _on_dec_done(self, out_path: str):
         self._set_busy(False)
@@ -3513,37 +2940,15 @@ class CryptoApp(QMainWindow):
 
 
 # ═══════════════════════════════════════════════════════════
-#  Application startup — MFA bootstrap
+#  Application startup — dependency check (no PIN / 2FA)
 # ═══════════════════════════════════════════════════════════
 
-def _run_startup_mfa(app: QApplication) -> bool:
+def _check_dependencies() -> bool:
     if not _ARGON2_AVAILABLE:
         QMessageBox.critical(None, "依賴缺失 / Missing Dependency",
             "請安裝 argon2-cffi：\npip install argon2-cffi\n\n"
             "Please install argon2-cffi first.")
         return False
-
-    if not _PYOTP_AVAILABLE:
-        QMessageBox.critical(None, "依賴缺失 / Missing Dependency",
-            "請安裝 pyotp：\npip install pyotp\n\nPlease install pyotp first.")
-        return False
-
-    if not security.is_initialized:
-        QMessageBox.information(None, "enCPTO v6.2 — 首次啟動 / First Run",
-            "歡迎使用 enCPTO v6.2！\n\n"
-            "首次使用需完成安全設定精靈 (PIN + TOTP)。\n\n"
-            "Welcome to enCPTO v6.2!\n"
-            "Please complete the security setup wizard (PIN + TOTP) to continue.")
-        wizard = SetupWizardDialog()
-        result = wizard.exec()
-        if result != QDialog.DialogCode.Accepted or not security.is_initialized:
-            return False
-
-    pin_dlg = PinDialog()
-    pin_dlg.exec()
-    if not pin_dlg.verified:
-        return False
-
     return True
 
 
@@ -3552,7 +2957,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # Minimal bootstrap stylesheet (overridden by _apply_theme after login)
+    # Minimal bootstrap stylesheet (overridden by _apply_theme on start-up)
     app.setStyleSheet("""
         QMainWindow, QWidget { background: #1e1e2e; color: #e0e0e0; }
         QLabel { color: #ccc; }
@@ -3570,7 +2975,7 @@ if __name__ == "__main__":
         QProgressBar { color: #fff; }
     """)
 
-    if not _run_startup_mfa(app):
+    if not _check_dependencies():
         sys.exit(0)
 
     win = CryptoApp()
