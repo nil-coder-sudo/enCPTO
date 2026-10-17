@@ -1,38 +1,33 @@
 # 🔐 enCPTO — Military-Grade Dual-Layer Encryption Tool
 
-**Repo:** [nil-coder-sudo/enCPTO](https://github.com/nil-coder-sudo/enCPTO) · **Script:** [`enCPTO-v6-2.py`](https://github.com/nil-coder-sudo/enCPTO/blob/main/enCPTO-v6-2.py)
+**Repo:** [nil-coder-sudo/enCPTO](https://github.com/nil-coder-sudo/enCPTO) · **Script:** [`enCPTO-v7.py`](https://github.com/nil-coder-sudo/enCPTO/blob/main/enCPTO-v7.py)
 
-**enCPTO** is a desktop file & folder encryption application built with Python and PyQt6. It combines a from-scratch AES-256 implementation, Argon2id key derivation, HMAC-SHA256 integrity verification, TOTP-based multi-factor authentication, and optional GPU (OpenCL) acceleration into a single, self-contained, offline tool.
+**enCPTO** is a desktop file & folder encryption application built with Python and PyQt6. It cascades two independent ciphers — **AES-256-CTR** and **XChaCha20-Poly1305** — under keys derived with **Argon2id + HKDF-SHA512**, seals the whole container with **HMAC-SHA512**, and offers optional GPU (OpenCL) acceleration, all in a single, self-contained, offline tool.
 
 No cloud, no telemetry, no accounts. Your key never leaves your machine.
 
-> **v6.2** adds a dedicated Settings panel, a live background-transparency slider, and per-widget opacity control — on top of the v6 security core (PIN + TOTP + recovery codes) and v6.1 theming system.
+> **v7.0** removes the PIN / TOTP / recovery-code layer — the encryption password is now the only thing you need — and introduces the stronger **V7 container format**. Files made by v6.x and earlier still decrypt.
 
 ---
 
 ## ✨ Features
 
-### 🔒 Cryptography
-- **AES-256**, implemented from scratch (custom S-box, key schedule, and round functions) — both a pure-Python/NumPy CPU path and a hand-written **OpenCL kernel** for GPU acceleration
-- **Argon2id** key derivation (`t=3, m=64MB, p=4`) for file passwords, with a lighter Argon2id profile for the local PIN
-- **AES-256-CTR** (GPU-accelerated path) or **AES-256-GCM** (CPU path) for bulk data encryption
-- **HMAC-SHA256** integrity tag covers the header *and* every ciphertext chunk — tampering or a wrong password is always detected before any plaintext is written to disk
-- Chunked streaming pipeline (4 MB blocks) so multi-gigabyte files never need to fit in RAM
+### 🔒 Cryptography (V7 format)
+- **Argon2id** key derivation, raised to `t=4, m=256 MiB, p=4` with a **32-byte salt**; the parameters are stored in each file's header so they can be raised again later without breaking old files
+- **HKDF-SHA512** splits the Argon2id output into independent sub-keys for each layer — no key is ever used for two purposes
+- **Dual-layer cascade:** layer 1 **AES-256-CTR** (from-scratch OpenCL kernel on GPU, or CPU) → layer 2 **XChaCha20-Poly1305**. Reading your data means breaking *both* AES and ChaCha20
+- Every 4 MiB chunk is authenticated and bound to the header, its index and a "final chunk" flag — chunks can't be reordered, dropped, truncated or spliced in from another file
+- **HMAC-SHA512** over the header, metadata and every chunk; the whole file is verified before a single byte of plaintext is written
+- **Encrypted metadata:** the original filename and file/folder type are encrypted and padded to a fixed size — nothing about the contents is visible without the password
+- Wrong passwords are rejected in under a second (metadata check) before the full integrity pass
 - Best-effort **secure memory wiping** of keys (`ctypes` + `mmap`) as soon as they're no longer needed
 
-### 🛡️ Multi-Factor Authentication
-- First-run **Setup Wizard**: PIN creation → TOTP secret + QR code (Google Authenticator / Authy compatible) → one-time-display **recovery codes**
-- App-unlock **PIN gate** with attempt limiting and timed lockout
-- **TOTP confirmation** required before every encrypt/decrypt operation
-- Single-use **recovery codes** as a TOTP fallback
-- MFA state is itself stored in an AES-256-GCM–encrypted config file, keyed to a machine-derived secret
-
 ### 📦 File Handling
-- Encrypt single files **or entire folders** (folders are streamed into a ZIP archive before encryption, with no full folder ever written unencrypted to disk)
-- Original filename is embedded in the encrypted container and restored automatically on decrypt
-- Backward-compatible decryption of older container versions (V2 / V3 / V4 / V6)
+- Encrypt single files **or entire folders** (folders are streamed into a ZIP archive in memory before encryption, never written unencrypted to disk)
+- Decrypt into a folder of your choice — the original name is restored automatically, and existing files are never overwritten (`name (1).ext`)
+- Backward-compatible decryption of older containers (V1 / V2 / V3 / V4 / V6)
 - Built-in **DoD 5220.22-M**–style 3-pass secure shredder to destroy source files/folders after encryption
-- Drag-and-drop, with live preview for images, text, and encrypted-container metadata
+- Drag-and-drop, with live preview for images, text, and encrypted-container info
 
 ### 🎨 Interface
 - Bilingual UI (繁體中文 / English) with a single toggle
@@ -46,30 +41,31 @@ No cloud, no telemetry, no accounts. Your key never leaves your machine.
 ## 🧱 Architecture at a Glance
 
 ```
-Password ──► Argon2id (t=3, m=64MB, p=4) ──► 64-byte key material
-                                               ├── AES-256 key   (bytes 0–32)
-                                               └── HMAC-SHA256 key (bytes 32–64)
+Password ──► Argon2id (t=4, m=256 MiB, p=4, 32-byte salt) ──► 64-byte master
+master   ──► HKDF-SHA512 (salt = SHA-512(header))
+               ├── k_aes  (32 B)  layer 1  AES-256-CTR
+               ├── k_xcc  (32 B)  layer 2  XChaCha20-Poly1305
+               └── k_mac  (64 B)  HMAC-SHA512
 
-Plaintext ──► [chunk 1][chunk 2]...[chunk N] ──► AES-256-CTR (GPU) or AES-256-GCM (CPU)
-                                               └──► HMAC-SHA256 over header + all ciphertext
-                                                    └──► V6 container (.dat)
+Plaintext chunk i ──► AES-256-CTR(k_aes) ──► XChaCha20-Poly1305(k_xcc, AAD = header hash ‖ i ‖ final)
+All chunks + header + metadata ──► HMAC-SHA512(k_mac) ──► V7 container (.dat)
 ```
 
-**V6 container layout:**
+**V7 container layout:**
 
-| Field           | Size            | Description                          |
-|-----------------|-----------------|---------------------------------------|
-| Magic           | 8 bytes         | `ENCPTO6\0`                            |
-| Mode            | 1 byte          | `0x01` CTR (GPU) / `0x02` GCM (CPU)    |
-| Flags           | 1 byte          | `0x00` single file / `0x01` ZIP folder |
-| Name length     | 2 bytes         | Length of embedded original filename   |
-| Original name   | variable        | UTF-8 filename, restored on decrypt    |
-| Argon2 salt     | 16 bytes        |                                        |
-| Base nonce      | 12 bytes        |                                        |
-| HMAC-SHA256     | 32 bytes        | Over header + full ciphertext          |
-| Ciphertext      | remainder       | 4 MB chunks, each independently nonced |
+| Field              | Size        | Description                                              |
+|--------------------|-------------|----------------------------------------------------------|
+| Magic              | 8 bytes     | `ENCPTO7\0`                                              |
+| KDF id             | 1 byte      | `0x01` = Argon2id                                        |
+| Argon2 t / m / p   | 4 + 4 + 1   | Time cost, memory (KiB), parallelism                     |
+| Salt               | 32 bytes    |                                                          |
+| AES IV prefix      | 8 bytes     | + 32-bit chunk index + 32-bit block counter              |
+| XChaCha nonce prefix | 16 bytes  | + 64-bit chunk index                                     |
+| Encrypted metadata | 528 bytes   | Flags, original filename, size — padded, then AEAD-sealed |
+| Ciphertext chunks  | variable    | `ct (≤ 4 MiB) + 16-byte Poly1305 tag` per chunk          |
+| HMAC-SHA512        | 64 bytes    | Over everything above                                    |
 
-Decryption re-derives the key, verifies the HMAC over the *entire* file before writing a single byte of plaintext, and only then decrypts — so a wrong password or a corrupted/tampered file fails safely.
+The header is public but authenticated: changing any byte (including the Argon2 parameters) changes the derived keys and fails verification. Absurd KDF parameters in an untrusted header are refused before any work is done.
 
 ---
 
@@ -78,11 +74,12 @@ Decryption re-derives the key, verifies the HMAC over the *entire* file before w
 ### Requirements
 - Python 3.10+
 - A GPU + OpenCL runtime is **optional** — the app falls back to a CPU implementation automatically
+- About 256 MB of free RAM while encrypting/decrypting (Argon2id)
 
 ### Install dependencies
 
 ```bash
-pip install PyQt6 pycryptodome argon2-cffi pyotp qrcode[pil] Pillow
+pip install PyQt6 pycryptodome argon2-cffi
 ```
 
 Optional, for GPU acceleration:
@@ -94,7 +91,7 @@ pip install pyopencl numpy
 ### Download
 
 ```bash
-curl -L -o enCPTO-v6-2.py https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v6-2.py
+curl -L -o enCPTO-v7.py https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v7.py
 ```
 
 Or clone the repository:
@@ -107,10 +104,10 @@ cd enCPTO
 ### Run
 
 ```bash
-python enCPTO-v6-2.py
+python enCPTO-v7.py
 ```
 
-On first launch you'll be guided through the **Security Setup Wizard**: choose a PIN, scan the generated QR code into an authenticator app, and save your one-time recovery codes somewhere safe. From then on, every launch starts with a PIN prompt, and every encrypt/decrypt action requires a TOTP code.
+The app opens straight to the main window — there is no PIN, authenticator app or setup wizard.
 
 ---
 
@@ -119,24 +116,29 @@ On first launch you'll be guided through the **Security Setup Wizard**: choose a
 1. **Select a file or folder** — via the buttons or by dragging it onto the window
 2. **Enter a strong encryption key** — the app enforces length ≥ 8 and at least 3 of {uppercase, lowercase, digits, symbols}, or generate one in **Settings → Password Generator**
 3. *(Optional)* Enable **secure shredding** to destroy the original after encryption
-4. Click **Encrypt** or **Decrypt**, confirm with your TOTP code, and choose where to save the output
-5. Adjust **theme, background, and opacity** any time from the Settings tab
+4. Click **Encrypt** and choose where to save the `.dat` file
+5. To decrypt, select the `.dat` file, enter the key, click **Decrypt** and pick an output folder — the original file or folder is restored there under its original name
 
-> ⚠️ There is no password recovery for encrypted files. If you forget the encryption key, the data is unrecoverable by design — that's what "military-grade" means. (This is separate from the app's own PIN/TOTP lock, which *does* have recovery codes.)
+> ⚠️ The password is now the **only** key. There is no password recovery: if you forget it, the data is unrecoverable by design. Store it in a password manager.
+
+### Upgrading from v6.x
+- Your existing `.dat` files keep working — just open them in v7.
+- New encryptions always use the V7 format, which v6.x cannot read.
+- The old MFA settings file `~/.encpto/security.cfg` is no longer used; you can delete it.
 
 ---
 
 ## 🗂️ Project Structure
 
-This is currently a single-file application (`enCPTO-v6-2.py`) organized into clearly separated sections:
+This is a single-file application (`enCPTO-v7.py`) organized into clearly separated sections:
 
 - Secure memory helpers
 - AES-256 key expansion + OpenCL kernel + `GpuManager`
-- Core streaming encryption/decryption engine (V2–V6 formats)
+- V7 primitives (header, Argon2id + HKDF, metadata) and the streaming encryption/decryption engine
+- Legacy V1–V6 decryption
 - Directory packing / secure shredding
-- `SecurityManager` (PIN, TOTP, recovery codes, encrypted config)
 - Password generator
-- PyQt6 UI: themes, settings panel, dialogs, main window
+- PyQt6 UI: themes, settings panel, main window
 
 ---
 
@@ -144,19 +146,18 @@ This is currently a single-file application (`enCPTO-v6-2.py`) organized into cl
 
 enCPTO stores local state under `~/.encpto/`:
 
-| File              | Contents                                                        |
-|-------------------|------------------------------------------------------------------|
-| `security.cfg`    | AES-256-GCM–encrypted PIN hash, TOTP secret, recovery code hashes |
-| `ui_prefs.cfg`     | Theme, background image path, opacity settings                   |
+| File            | Contents                                       |
+|-----------------|------------------------------------------------|
+| `ui_prefs.cfg`  | Theme, background image path, opacity settings |
 
-Both are local-only and never transmitted anywhere.
+It is local-only and never transmitted anywhere.
 
 ---
 
 ## ⚠️ Security Notes & Disclaimer
 
-- This project implements its own AES-256 (including a hand-written OpenCL kernel) for educational and performance purposes. It has **not** undergone formal third-party security audit or side-channel analysis. For high-stakes/regulated use cases, prefer audited, widely-reviewed cryptographic libraries.
-- Losing your encryption password **and** your MFA recovery codes at the same time means permanent data/access loss — there is no backdoor.
+- The GPU path uses a hand-written OpenCL AES-256 kernel (validated against PyCryptodome at start-up); the CPU path and XChaCha20-Poly1305 / HMAC layers use PyCryptodome. The project has **not** undergone a formal third-party security audit or side-channel analysis. For high-stakes/regulated use cases, prefer audited, widely-reviewed tools.
+- Encryption strength is bounded by your password. Use a long, random one (the built-in generator is a good start).
 - Secure shredding overwrites files before deletion but cannot guarantee data is unrecoverable on SSDs, journaling filesystems, or systems with wear-leveling/snapshots.
 - Use at your own risk. Always keep independent backups of anything important.
 
@@ -174,10 +175,10 @@ Issues and pull requests are welcome — particularly around:
 
 ## 📄 License
 
-Specify your chosen license here (e.g., MIT, Apache-2.0, GPL-3.0).
+See [LICENSE](LICENSE).
 
 ---
 
 ## 🙏 Acknowledgements
 
-Built with [PyQt6](https://www.riverbankcomputing.com/software/pyqt/), [PyCryptodome](https://www.pycryptodome.org/), [argon2-cffi](https://github.com/hynek/argon2-cffi), [PyOTP](https://github.com/pyauth/pyotp), and [PyOpenCL](https://documen.tician.de/pyopencl/).
+Built with [PyQt6](https://www.riverbankcomputing.com/software/pyqt/), [PyCryptodome](https://www.pycryptodome.org/), [argon2-cffi](https://github.com/hynek/argon2-cffi), and [PyOpenCL](https://documen.tician.de/pyopencl/).
