@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux (GCC, system Qt), os: ubuntu-24.04 }
+          - { name: macOS (Apple Silicon),  os: macos-14 }
+          - { name: Windows (MSVC),         os: windows-2022 }
+
+    env:
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-cache,readwrite
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build pkg-config \
+            libssl-dev libsodium-dev qt6-base-dev qt6-svg-dev libgl1-mesa-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja pkg-config openssl@3 libsodium qt
+
+      - name: Cache vcpkg packages (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Install Qt (Windows)
+        if: runner.os == 'Windows'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.*"
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S . -B build -A x64 \
+              -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+              -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix openssl@3)"
+          else
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Benchmark
+        shell: bash
+        run: |
+          exe=build/tests/encpto-tests
+          [ -f build/tests/Release/encpto-tests.exe ] && exe=build/tests/Release/encpto-tests.exe
+          "$exe" --bench | tail -4
+
+  compat:
+    name: Byte compatibility with the Python tool
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build pkg-config libssl-dev libsodium-dev
+          pip install pycryptodome argon2-cffi
+      - name: Build CLI
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENCPTO_BUILD_GUI=OFF -DENCPTO_BUILD_TESTS=OFF
+          cmake --build build --target encpto-cli
+      - name: C++ ⇄ Python, both directions
+        run: python tests/compat/run_compat.py build/src/cli/encpto-cli

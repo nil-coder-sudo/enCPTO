@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <clipPath id="c"><rect x="8" y="8" width="240" height="240" rx="52"/></clipPath>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#0A1A33"/>
+  <g clip-path="url(#c)"><path d="M40 8V248M8 40H248" stroke="#163A66" stroke-width="2"/><path d="M72 8V248M8 72H248" stroke="#163A66" stroke-width="2"/><path d="M104 8V248M8 104H248" stroke="#163A66" stroke-width="2"/><path d="M136 8V248M8 136H248" stroke="#163A66" stroke-width="2"/><path d="M168 8V248M8 168H248" stroke="#163A66" stroke-width="2"/><path d="M200 8V248M8 200H248" stroke="#163A66" stroke-width="2"/><path d="M232 8V248M8 232H248" stroke="#163A66" stroke-width="2"/></g>
+  <circle cx="128" cy="128" r="74" fill="none" stroke="#6FB8E6" stroke-width="10"/>
+  <path d="M40 128h22M194 128h22M128 40v22M128 194v22" stroke="#6FB8E6" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="128" cy="112" r="22" fill="#F5B942"/>
+  <path d="M116 124h24l8 48h-40z" fill="#F5B942"/>
+</svg>

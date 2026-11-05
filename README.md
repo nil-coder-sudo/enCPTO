@@ -1,184 +1,138 @@
-# 🔐 enCPTO — Military-Grade Dual-Layer Encryption Tool
+# enCPTO
 
-**Repo:** [nil-coder-sudo/enCPTO](https://github.com/nil-coder-sudo/enCPTO) · **Script:** [`enCPTO-v7.py`](https://github.com/nil-coder-sudo/enCPTO/blob/main/enCPTO-v7.py)
+[![CI](https://github.com/nil-coder-sudo/enCPTO/actions/workflows/ci.yml/badge.svg)](https://github.com/nil-coder-sudo/enCPTO/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/nil-coder-sudo/enCPTO)](https://github.com/nil-coder-sudo/enCPTO/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**enCPTO** is a desktop file & folder encryption application built with Python and PyQt6. It cascades two independent ciphers — **AES-256-CTR** and **XChaCha20-Poly1305** — under keys derived with **Argon2id + HKDF-SHA512**, seals the whole container with **HMAC-SHA512**, and offers optional GPU (OpenCL) acceleration, all in a single, self-contained, offline tool.
+**English** · [繁體中文](README.zh-TW.md)
 
-No cloud, no telemetry, no accounts. Your key never leaves your machine.
+Offline file and folder encryption. enCPTO cascades two independent ciphers —
+**AES-256-CTR** and **XChaCha20-Poly1305** — under keys derived with
+**Argon2id + HKDF-SHA512**, and seals every container with **HMAC-SHA512**.
+No cloud, no accounts, no telemetry: one password, and it never leaves your machine.
 
-> **v7.0** removes the PIN / TOTP / recovery-code layer — the encryption password is now the only thing you need — and introduces the stronger **V7 container format**. Files made by v6.x and earlier still decrypt.
+Version 8 is a native C++ rewrite of the v7 Python tool. Files are **byte-for-byte compatible**
+with v7.0 in both directions; it is just faster, smaller and needs nothing installed.
 
----
+<p align="center">
+  <img src="docs/images/main-dark.png" width="49%" alt="enCPTO with a file loaded, Blueprint theme">
+  <img src="docs/images/progress-light.png" width="49%" alt="Encrypting a 1 GB file, Drafting-paper theme">
+</p>
 
-## ✨ Features
+## Download
 
-### 🔒 Cryptography (V7 format)
-- **Argon2id** key derivation, raised to `t=4, m=256 MiB, p=4` with a **32-byte salt**; the parameters are stored in each file's header so they can be raised again later without breaking old files
-- **HKDF-SHA512** splits the Argon2id output into independent sub-keys for each layer — no key is ever used for two purposes
-- **Dual-layer cascade:** layer 1 **AES-256-CTR** (from-scratch OpenCL kernel on GPU, or CPU) → layer 2 **XChaCha20-Poly1305**. Reading your data means breaking *both* AES and ChaCha20
-- Every 4 MiB chunk is authenticated and bound to the header, its index and a "final chunk" flag — chunks can't be reordered, dropped, truncated or spliced in from another file
-- **HMAC-SHA512** over the header, metadata and every chunk; the whole file is verified before a single byte of plaintext is written
-- **Encrypted metadata:** the original filename and file/folder type are encrypted and padded to a fixed size — nothing about the contents is visible without the password
-- Wrong passwords are rejected in under a second (metadata check) before the full integrity pass
-- Best-effort **secure memory wiping** of keys (`ctypes` + `mmap`) as soon as they're no longer needed
+Get the latest build from **[Releases](https://github.com/nil-coder-sudo/enCPTO/releases/latest)**:
 
-### 📦 File Handling
-- Encrypt single files **or entire folders** (folders are streamed into a ZIP archive in memory before encryption, never written unencrypted to disk)
-- Decrypt into a folder of your choice — the original name is restored automatically, and existing files are never overwritten (`name (1).ext`)
-- Backward-compatible decryption of older containers (V1 / V2 / V3 / V4 / V6)
-- Built-in **DoD 5220.22-M**–style 3-pass secure shredder to destroy source files/folders after encryption
-- Drag-and-drop, with live preview for images, text, and encrypted-container info
+| Platform | File | Notes |
+|---|---|---|
+| Windows 10/11 x64 | `enCPTO-…-windows-x64.zip` | Portable: unzip and run `enCPTO.exe` |
+| macOS 12+ (Apple Silicon) | `enCPTO-…-macos-arm64.dmg` | Not notarised: right-click → **Open** the first time |
+| Linux x86-64 | `enCPTO-…-linux-x86_64.AppImage` | `chmod +x` and run; CLI also as `.tar.gz` |
 
-### 🎨 Interface
-- Bilingual UI (繁體中文 / English) with a single toggle
-- Six themes: **Dark, Light, System, Auto, Army Green, Deep Hacker**
-- Custom background image support with independent **background opacity** and **widget opacity** sliders
-- Built-in **strong password generator** (configurable length, character sets, ambiguous-character exclusion)
-- Non-blocking background worker thread with live progress reporting
+Every package includes the `encpto-cli` command-line tool. `SHA256SUMS.txt` is published alongside.
 
----
+## Features
 
-## 🧱 Architecture at a Glance
+- **Two ciphers from different families.** Layer 1 AES-256-CTR, layer 2 XChaCha20-Poly1305, each with its own HKDF sub-key. Reading the data means breaking both.
+- **Memory-hard key derivation.** Argon2id, t=4, 256 MiB, p=4, 32-byte salt. The parameters live in each file's header, so they can be raised later without breaking old files.
+- **Verified before anything is written.** Each 4 MiB chunk is bound to the header, its index and a final-chunk flag; HMAC-SHA512 covers the whole file and is checked before a single byte of plaintext reaches the disk. A wrong password is rejected in under a second.
+- **Nothing leaks.** The original file name and whether it was a file or a folder are encrypted and padded to a fixed size.
+- **Folders.** Packed into a ZIP in memory (parallel compression, media files stored as-is, empty folders kept) and encrypted; the plaintext archive never touches the disk.
+- **Shredder.** Optional 3-pass overwrite (0x00 → 0xFF → random), rename and delete of the source after encryption.
+- **Desktop app.** Drag and drop, previews, live progress with speed and cancel, password generator, six themes (Blueprint, Drafting paper, System, Automatic, Army green, Terminal green), custom background, 繁體中文 / English.
 
-```
-Password ──► Argon2id (t=4, m=256 MiB, p=4, 32-byte salt) ──► 64-byte master
-master   ──► HKDF-SHA512 (salt = SHA-512(header))
-               ├── k_aes  (32 B)  layer 1  AES-256-CTR
-               ├── k_xcc  (32 B)  layer 2  XChaCha20-Poly1305
-               └── k_mac  (64 B)  HMAC-SHA512
+## Performance
 
-Plaintext chunk i ──► AES-256-CTR(k_aes) ──► XChaCha20-Poly1305(k_xcc, AAD = header hash ‖ i ‖ final)
-All chunks + header + metadata ──► HMAC-SHA512(k_mac) ──► V7 container (.dat)
-```
+v8 spreads the cipher work over every CPU core and overlaps it with the (inherently sequential) HMAC and with disk I/O.
+Measured on the same 2-vCPU cloud VM, same files, same password; machines with more cores gain more.
 
-**V7 container layout:**
+| Task | v7.0 (Python) | v8.0 (C++) | |
+|---|---:|---:|---:|
+| Encrypt 1 GiB file | 4.6 s | 2.4 s | **1.9×** |
+| Decrypt 1 GiB file | 5.0 s | 3.2 s | **1.6×** |
+| Encrypt 386 MB folder (170 files) | 7.5 s | 3.0 s | **2.5×** |
+| Decrypt 386 MB folder | 3.0 s | 2.0 s | **1.5×** |
 
-| Field              | Size        | Description                                              |
-|--------------------|-------------|----------------------------------------------------------|
-| Magic              | 8 bytes     | `ENCPTO7\0`                                              |
-| KDF id             | 1 byte      | `0x01` = Argon2id                                        |
-| Argon2 t / m / p   | 4 + 4 + 1   | Time cost, memory (KiB), parallelism                     |
-| Salt               | 32 bytes    |                                                          |
-| AES IV prefix      | 8 bytes     | + 32-bit chunk index + 32-bit block counter              |
-| XChaCha nonce prefix | 16 bytes  | + 64-bit chunk index                                     |
-| Encrypted metadata | 528 bytes   | Flags, original filename, size — padded, then AEAD-sealed |
-| Ciphertext chunks  | variable    | `ct (≤ 4 MiB) + 16-byte Poly1305 tag` per chunk          |
-| HMAC-SHA512        | 64 bytes    | Over everything above                                    |
+Every operation includes a fixed ~0.5 s for Argon2id — that is deliberate, it is what makes password guessing expensive.
+CI prints a fresh benchmark for every platform in the *Benchmark* step.
 
-The header is public but authenticated: changing any byte (including the Argon2 parameters) changes the derived keys and fails verification. Absurd KDF parameters in an untrusted header are refused before any work is done.
-
----
-
-## 📥 Installation
-
-### Requirements
-- Python 3.10+
-- A GPU + OpenCL runtime is **optional** — the app falls back to a CPU implementation automatically
-- About 256 MB of free RAM while encrypting/decrypting (Argon2id)
-
-### Install dependencies
+## Command line
 
 ```bash
-pip install PyQt6 pycryptodome argon2-cffi
+encpto-cli encrypt report.pdf                 # → report.pdf.dat (asks for the password twice)
+encpto-cli encrypt "My Folder" -o backup.dat --shred
+encpto-cli decrypt backup.dat -o restored/     # restores "My Folder" under its original name
+encpto-cli info backup.dat
+encpto-cli genpass --length 32 --no-ambiguous
 ```
 
-Optional, for GPU acceleration:
+`--password-stdin` reads the password from the first line of standard input for scripting.
+Exit codes: `0` success, `3` wrong password, `4` damaged or modified file, `130` cancelled.
+
+## Building from source
+
+Requirements: CMake ≥ 3.21, a C++20 compiler, OpenSSL 3, libsodium, Qt ≥ 6.4 (Widgets, Svg).
+Argon2, libdeflate and miniz are fetched automatically at a pinned version.
 
 ```bash
-pip install pyopencl numpy
+# Debian / Ubuntu
+sudo apt install cmake ninja-build pkg-config libssl-dev libsodium-dev qt6-base-dev qt6-svg-dev
+# macOS
+brew install cmake ninja pkg-config openssl@3 libsodium qt
+
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
+./build/src/app/encpto            # or build/src/app/enCPTO.app on macOS
 ```
 
-### Download
+On Windows, install Qt 6 and build with the vcpkg toolchain (OpenSSL and libsodium come from `vcpkg.json`):
 
-```bash
-curl -L -o enCPTO-v7.py https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v7.py
+```powershell
+cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake `
+      -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64
+cmake --build build --config Release
 ```
 
-Or clone the repository:
+Options: `-DENCPTO_BUILD_GUI=OFF` (engine + CLI only), `-DENCPTO_BUILD_TESTS=OFF`.
 
-```bash
-git clone https://github.com/nil-coder-sudo/enCPTO.git
-cd enCPTO
+## Project layout
+
+```
+src/core/       encryption engine (no Qt): format, crypto, pipeline, archive, shredder
+src/cli/        encpto-cli
+src/app/        Qt 6 desktop app
+tests/          unit tests, fixtures made by the Python tool, Python reference implementation
+legacy/         the v7.0 Python app (needed only for V1–V6 files)
+docs/           container format specification, screenshots
+.github/        CI (Linux, macOS, Windows + C++⇄Python compatibility) and release packaging
+index.html      project website (GitHub Pages)
 ```
 
-### Run
+## Compatibility
 
-```bash
-python enCPTO-v7.py
-```
+- **V7 containers** (made by v7.0 or v8): fully supported, both directions — verified in CI against
+  files produced by the original Python tool and by an independent Python reference implementation.
+- **V1–V6 containers** (v6.x and older): not read by v8. Decrypt them once with
+  [`legacy/enCPTO-v7.py`](legacy/), then re-encrypt with v8.
+- Settings in `~/.encpto/ui_prefs.cfg` carry over.
 
-The app opens straight to the main window — there is no PIN, authenticator app or setup wizard.
+The byte-level format is documented in [docs/FORMAT.md](docs/FORMAT.md).
 
----
+## Security notes
 
-## 🚀 Usage
+- The password is the only key. There is no recovery: if you forget it, the data is gone. Use a password manager.
+- The cryptography comes from widely used libraries (OpenSSL, libsodium, the Argon2 reference implementation),
+  but enCPTO itself has **not** had a formal third-party audit. For regulated or high-stakes use, prefer audited tools.
+- Keys are held in locked, guard-paged memory (`sodium_malloc`) and wiped after use; plaintext buffers are wiped too.
+- Shredding cannot guarantee that data is unrecoverable on SSDs, copy-on-write or journaling file systems, or with snapshots.
+- Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
 
-1. **Select a file or folder** — via the buttons or by dragging it onto the window
-2. **Enter a strong encryption key** — the app enforces length ≥ 8 and at least 3 of {uppercase, lowercase, digits, symbols}, or generate one in **Settings → Password Generator**
-3. *(Optional)* Enable **secure shredding** to destroy the original after encryption
-4. Click **Encrypt** and choose where to save the `.dat` file
-5. To decrypt, select the `.dat` file, enter the key, click **Decrypt** and pick an output folder — the original file or folder is restored there under its original name
+## Contributing
 
-> ⚠️ The password is now the **only** key. There is no password recovery: if you forget it, the data is unrecoverable by design. Store it in a password manager.
+Issues and pull requests are welcome, especially cross-platform testing, translations and security review.
+Run `ctest` and `python tests/compat/run_compat.py build/src/cli/encpto-cli` before submitting.
 
-### Upgrading from v6.x
-- Your existing `.dat` files keep working — just open them in v7.
-- New encryptions always use the V7 format, which v6.x cannot read.
-- The old MFA settings file `~/.encpto/security.cfg` is no longer used; you can delete it.
+## License
 
----
-
-## 🗂️ Project Structure
-
-This is a single-file application (`enCPTO-v7.py`) organized into clearly separated sections:
-
-- Secure memory helpers
-- AES-256 key expansion + OpenCL kernel + `GpuManager`
-- V7 primitives (header, Argon2id + HKDF, metadata) and the streaming encryption/decryption engine
-- Legacy V1–V6 decryption
-- Directory packing / secure shredding
-- Password generator
-- PyQt6 UI: themes, settings panel, main window
-
----
-
-## 🔧 Configuration Files
-
-enCPTO stores local state under `~/.encpto/`:
-
-| File            | Contents                                       |
-|-----------------|------------------------------------------------|
-| `ui_prefs.cfg`  | Theme, background image path, opacity settings |
-
-It is local-only and never transmitted anywhere.
-
----
-
-## ⚠️ Security Notes & Disclaimer
-
-- The GPU path uses a hand-written OpenCL AES-256 kernel (validated against PyCryptodome at start-up); the CPU path and XChaCha20-Poly1305 / HMAC layers use PyCryptodome. The project has **not** undergone a formal third-party security audit or side-channel analysis. For high-stakes/regulated use cases, prefer audited, widely-reviewed tools.
-- Encryption strength is bounded by your password. Use a long, random one (the built-in generator is a good start).
-- Secure shredding overwrites files before deletion but cannot guarantee data is unrecoverable on SSDs, journaling filesystems, or systems with wear-leveling/snapshots.
-- Use at your own risk. Always keep independent backups of anything important.
-
----
-
-## 🤝 Contributing
-
-Issues and pull requests are welcome — particularly around:
-- Cross-platform testing (Windows / macOS / Linux)
-- Additional language localizations
-- Security review and hardening
-- Packaging into standalone binaries (PyInstaller / Nuitka)
-
----
-
-## 📄 License
-
-See [LICENSE](LICENSE).
-
----
-
-## 🙏 Acknowledgements
-
-Built with [PyQt6](https://www.riverbankcomputing.com/software/pyqt/), [PyCryptodome](https://www.pycryptodome.org/), [argon2-cffi](https://github.com/hynek/argon2-cffi), and [PyOpenCL](https://documen.tician.de/pyopencl/).
+[MIT](LICENSE). Bundled at build time: Argon2 (CC0/Apache-2.0), libdeflate (MIT), miniz (MIT); linked: OpenSSL (Apache-2.0), libsodium (ISC), Qt (LGPLv3).

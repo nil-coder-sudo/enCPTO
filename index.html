@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>enCPTO — Download</title>
+<meta name="description" content="enCPTO: offline file and folder encryption with Argon2id, AES-256 and XChaCha20-Poly1305. Native apps for Windows, macOS and Linux.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -34,6 +35,7 @@
     background-position:-1px -1px;
   }
   ::selection{background:var(--amber);color:var(--blue-0);}
+  p code{font-family:'IBM Plex Mono',monospace;font-size:0.92em;color:var(--paper);background:rgba(111,184,230,0.12);padding:1px 5px;border-radius:2px;}
 
   a{color:inherit;}
 
@@ -300,7 +302,7 @@
   <section class="hero">
     <div class="wrap hero-grid">
       <div>
-        <span class="eyebrow">v7.0 · Offline &amp; Open Source</span>
+        <span class="eyebrow">v8.0 · Offline &amp; Open Source</span>
         <h1>Encrypt anything.<br>Trust <span>no server.</span></h1>
         <p class="lede">
           enCPTO is a desktop tool that locks files and folders behind
@@ -310,12 +312,12 @@
           the key derivation and the ciphertext never leave your machine.
         </p>
         <div class="cta-row">
-          <a href="https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v7.py" class="btn btn-primary" download>Download enCPTO-v7.py</a>
-          <a href="https://github.com/nil-coder-sudo/enCPTO/blob/main/enCPTO-v7.py" class="btn btn-ghost">View source on GitHub</a>
+          <a href="#download" class="btn btn-primary">Download enCPTO 8.0</a>
+          <a href="https://github.com/nil-coder-sudo/enCPTO" class="btn btn-ghost">View source on GitHub</a>
         </div>
         <div class="meta-line">
           <span><b>Platforms</b> — Win · macOS · Linux</span>
-          <span><b>Runtime</b> — Python 3.10+</span>
+          <span><b>Runtime</b> — native C++, nothing to install</span>
         </div>
       </div>
 
@@ -407,7 +409,7 @@
         <div class="card">
           <span class="num">01</span>
           <h3>Dual-cipher cascade</h3>
-          <p>Layer 1 is AES-256-CTR (a hand-written OpenCL kernel on GPU, or CPU); layer 2 is XChaCha20-Poly1305 with an independent key. Reading your data means breaking both.</p>
+          <p>Layer 1 is AES-256-CTR (AES-NI via OpenSSL); layer 2 is XChaCha20-Poly1305 (libsodium) with an independent key. Reading your data means breaking both.</p>
         </div>
         <div class="card">
           <span class="num">02</span>
@@ -422,12 +424,12 @@
         <div class="card">
           <span class="num">04</span>
           <h3>Nothing leaks, nothing to set up</h3>
-          <p>The original filename and type are encrypted too. No PIN, no authenticator, no wizard — open the app, enter your password, done. Old v6 files still decrypt.</p>
+          <p>The original filename and type are encrypted too. No PIN, no authenticator, no wizard. Files made by enCPTO v7.0 open unchanged.</p>
         </div>
         <div class="card">
           <span class="num">05</span>
-          <h3>Streaming folder mode</h3>
-          <p>Whole directories are streamed into a ZIP and encrypted in 4&#160;MB chunks — no multi-gigabyte file needs to fit in memory, and no plaintext archive touches disk.</p>
+          <h3>Every core, every chunk</h3>
+          <p>4&#160;MB chunks are encrypted on all CPU cores while the HMAC and disk writes run alongside. Folders are compressed in parallel in memory; no plaintext archive touches disk.</p>
         </div>
         <div class="card">
           <span class="num">06</span>
@@ -443,26 +445,28 @@
       <div class="section-head">
         <span class="tag">Get Running</span>
         <h2>Install in under a minute</h2>
-        <p>enCPTO is a single Python application. GPU acceleration is optional and detected automatically at launch.</p>
+        <p>Download the app for your system below and open it. Prefer the terminal? Every package also ships <code>encpto-cli</code>.</p>
       </div>
 
       <div class="install-grid">
         <div class="code-panel">
-          <div class="code-head"><span>Terminal — required</span><button class="copy-btn" onclick="copyCode('c1')">Copy</button></div>
-          <pre id="c1">pip install PyQt6 pycryptodome argon2-cffi</pre>
+          <div class="code-head"><span>Terminal — encrypt</span><button class="copy-btn" onclick="copyCode('c1')">Copy</button></div>
+          <pre id="c1">encpto-cli encrypt "My Folder" -o backup.dat</pre>
         </div>
         <div class="code-panel">
-          <div class="code-head"><span>Terminal — optional GPU</span><button class="copy-btn" onclick="copyCode('c2')">Copy</button></div>
-          <pre id="c2"><span class="c"># accelerates AES-256-CTR via OpenCL</span>
-pip install pyopencl numpy</pre>
+          <div class="code-head"><span>Terminal — decrypt</span><button class="copy-btn" onclick="copyCode('c2')">Copy</button></div>
+          <pre id="c2">encpto-cli decrypt backup.dat -o restored/</pre>
         </div>
       </div>
 
       <div style="height:18px;"></div>
 
       <div class="code-panel">
-        <div class="code-head"><span>Terminal — run</span><button class="copy-btn" onclick="copyCode('c3')">Copy</button></div>
-        <pre id="c3">python enCPTO-v7.py</pre>
+        <div class="code-head"><span>Build from source — CMake, Qt 6, OpenSSL 3, libsodium</span><button class="copy-btn" onclick="copyCode('c3')">Copy</button></div>
+        <pre id="c3">git clone https://github.com/nil-coder-sudo/enCPTO.git
+cd enCPTO
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel</pre>
       </div>
     </div>
   </section>
@@ -471,34 +475,35 @@ pip install pyopencl numpy</pre>
     <div class="wrap">
       <div class="section-head">
         <span class="tag">Download</span>
-        <h2>Get enCPTO v7.0</h2>
-        <p>enCPTO is a single Python file. Download it directly, or clone the repository. Works on Windows, macOS, and Linux with Python 3.10+.</p>
+        <h2>Get enCPTO 8.0</h2>
+        <p>Native builds are produced by GitHub Actions for every release, with SHA-256 checksums alongside.</p>
       </div>
 
-      <div class="platform" data-os="Single File" style="max-width:640px;">
-        <h3>enCPTO-v7.py</h3>
-        <p>The complete application — cipher engine, GPU kernel, and UI — in one file. No build step required.</p>
-        <div class="dl">
-          <span>nil-coder-sudo / enCPTO</span>
-          <a href="https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v7.py" download>Download raw file →</a>
+      <div class="platform-grid">
+        <div class="platform" data-os="Windows">
+          <h3>Windows 10 / 11</h3>
+          <p>Portable ZIP for 64-bit Windows. Unzip anywhere and run <code>enCPTO.exe</code>.</p>
+          <div class="dl"><span>windows-x64.zip</span><a href="https://github.com/nil-coder-sudo/enCPTO/releases/latest">Releases →</a></div>
+        </div>
+        <div class="platform" data-os="macOS">
+          <h3>macOS 12+</h3>
+          <p>Disk image for Apple Silicon. On first launch, right-click the app and choose Open.</p>
+          <div class="dl"><span>macos-arm64.dmg</span><a href="https://github.com/nil-coder-sudo/enCPTO/releases/latest">Releases →</a></div>
+        </div>
+        <div class="platform" data-os="Linux">
+          <h3>Linux</h3>
+          <p>AppImage for x86-64 (glibc 2.35+). Make it executable and run it; no install needed.</p>
+          <div class="dl"><span>linux-x86_64.AppImage</span><a href="https://github.com/nil-coder-sudo/enCPTO/releases/latest">Releases →</a></div>
         </div>
       </div>
 
       <div style="height:26px;"></div>
 
       <div class="code-panel">
-        <div class="code-head"><span>Or clone the repository</span><button class="copy-btn" onclick="copyCode('c4')">Copy</button></div>
-        <pre id="c4">git clone https://github.com/nil-coder-sudo/enCPTO.git
-cd enCPTO
-python enCPTO-v7.py</pre>
-      </div>
-
-      <div style="height:14px;"></div>
-
-      <div class="code-panel">
-        <div class="code-head"><span>Or download with curl</span><button class="copy-btn" onclick="copyCode('c5')">Copy</button></div>
-        <pre id="c5">curl -L -o enCPTO-v7.py https://raw.githubusercontent.com/nil-coder-sudo/enCPTO/main/enCPTO-v7.py
-python enCPTO-v7.py</pre>
+        <div class="code-head"><span>Have files from enCPTO v6 or older?</span><button class="copy-btn" onclick="copyCode('c4')">Copy</button></div>
+        <pre id="c4"><span class="c"># 8.0 reads V7 containers. Decrypt V1–V6 files once with the legacy tool:</span>
+pip install PyQt6 pycryptodome argon2-cffi
+python legacy/enCPTO-v7.py</pre>
       </div>
     </div>
   </section>
@@ -527,8 +532,8 @@ python enCPTO-v7.py</pre>
   <div class="wrap">
     <div class="titleblock">
       <div><b>Project</b>enCPTO</div>
-      <div><b>Revision</b>v7.0</div>
-      <div><b>Drawn</b>PyQt6 / Python 3.10+</div>
+      <div><b>Revision</b>v8.0</div>
+      <div><b>Drawn</b>C++20 / Qt 6</div>
     </div>
     <div class="foot-links">
       <span>© enCPTO — offline-first encryption tool.</span>

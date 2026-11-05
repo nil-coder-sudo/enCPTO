@@ -1,0 +1,25 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/">
+    <file>app-icon.svg</file>
+    <file>icons/alert.svg</file>
+    <file>icons/check.svg</file>
+    <file>icons/copy.svg</file>
+    <file>icons/cpu.svg</file>
+    <file>icons/dice.svg</file>
+    <file>icons/drop.svg</file>
+    <file>icons/eye-off.svg</file>
+    <file>icons/eye.svg</file>
+    <file>icons/file.svg</file>
+    <file>icons/folder.svg</file>
+    <file>icons/globe.svg</file>
+    <file>icons/image.svg</file>
+    <file>icons/key.svg</file>
+    <file>icons/lock.svg</file>
+    <file>icons/settings.svg</file>
+    <file>icons/shield.svg</file>
+    <file>icons/trash.svg</file>
+    <file>icons/unlock.svg</file>
+    <file>icons/x.svg</file>
+  </qresource>
+</RCC>
