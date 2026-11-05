@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=enCPTO
+GenericName=File Encryption
+Comment=Encrypt files and folders with Argon2id + AES-256 ⊕ XChaCha20-Poly1305
+Comment[zh_TW]=以 Argon2id + AES-256 ⊕ XChaCha20-Poly1305 加密檔案與資料夾
+Exec=encpto %f
+Icon=encpto
+Terminal=false
+Categories=Utility;Security;Qt;
+MimeType=application/octet-stream;
