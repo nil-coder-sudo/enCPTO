@@ -84,6 +84,11 @@ jobs:
           app=build/src/app/enCPTO.app
           cp build/src/cli/encpto-cli "$app/Contents/MacOS/"
           macdeployqt "$app" -executable="$app/Contents/MacOS/encpto-cli"
+          # Every non-system library must now live inside the bundle.
+          if find "$app/Contents" -type f \( -perm -u+x -o -name "*.dylib" \) -exec otool -L {} \; 2>/dev/null \
+               | grep -E "/opt/homebrew|/usr/local/(opt|Cellar)|$QT_ROOT_DIR"; then
+            echo "::error::Unbundled dependency in the app bundle"; exit 1
+          fi
           codesign --force --deep --sign - "$app"   # ad-hoc signature (required on Apple Silicon)
           mkdir dmg && cp -R "$app" dmg/ && ln -s /Applications dmg/Applications
           hdiutil create -volname "enCPTO $ver" -srcfolder dmg -ov -format UDZO "enCPTO-$ver-macos-arm64.dmg"
