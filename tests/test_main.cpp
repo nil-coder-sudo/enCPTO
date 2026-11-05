@@ -90,6 +90,68 @@ struct TempDir {
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
+std::string hex(std::span<const std::uint8_t> b) {
+    static constexpr char d[] = "0123456789abcdef";
+    std::string s;
+    for (const auto c : b) {
+        s.push_back(d[c >> 4]);
+        s.push_back(d[c & 15]);
+    }
+    return s;
+}
+
+std::vector<std::uint8_t> seq(std::size_t n) {
+    std::vector<std::uint8_t> v(n);
+    for (std::size_t i = 0; i < n; ++i) v[i] = static_cast<std::uint8_t>(i);
+    return v;
+}
+
+crypto::Bytes str(const char* s) { return {reinterpret_cast<const std::uint8_t*>(s), std::strlen(s)}; }
+
+#define CHECK_HEX(actual, expected)                                                      \
+    do {                                                                               \
+        const std::string got_ = hex(actual);                                          \
+        ++g_checks;                                                                    \
+        if (got_ != (expected)) {                                                      \
+            ++g_failures;                                                              \
+            std::cerr << "  FAILED: " #actual "\n    got      " << got_                \
+                      << "\n    expected " << (expected) << "\n";                     \
+        }                                                                              \
+    } while (0)
+
+// Vectors computed with argon2-cffi / PyCryptodome / hashlib (what v7.0 used).
+void test_primitives() {
+    std::array<std::uint8_t, 32> a{};
+    crypto::argon2id(str("password"), str("somesaltsomesalt"), 2, 65536, 1, a);
+    CHECK_HEX(a, "fc33b78139231d34b71626bd6245c1d72efa190ad605c3d8166a72adcedfa2c2");
+    crypto::argon2id(str("password"), str("somesaltsomesalt"), 2, 65536, 4, a);
+    CHECK_HEX(a, "ef68e65f3629bffdbcc81c7488c3a1d194b768a32db1a28575a4d675dba0da0f");
+
+    std::array<std::uint8_t, 128> okm{};
+    std::string salt;
+    for (int i = 0; i < 16; ++i) salt += "salt";
+    crypto::hkdf_sha512(seq(64), str(salt.c_str()), str("enCPTO-v7 subkeys"), okm);
+    CHECK_HEX(okm, "2f2f1d543858ec00388b8f89a70ed3208b7f0c41f525bda4d539be96884513fb0dcb9054875005d387a761592b793c036db3b1ec774f598e4fdc39aa21a6c3424f2252a6476dfbebe2bd3d4e867e44cac4379203b1e6369cf474d65310ec28498b058bdfa58e97023a13afbad0166dd8e89a10ae089119795114a002c4321bf8");
+
+    std::vector<std::uint8_t> zeros(40, 0);
+    std::array<std::uint8_t, 16> iv{};
+    for (int i = 0; i < 12; ++i) iv[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(i);
+    crypto::aes256_ctr_xor(seq(32), iv, zeros.data(), zeros.size());
+    CHECK_HEX(zeros, "bddc4ccab15066ccc1fe6b0cba133eb6f4c2db1dc38805a37b92171c5d0a81cc4702d61bc5e5c21b");
+
+    std::vector<std::uint8_t> msg{'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd'};
+    std::array<std::uint8_t, 24> nonce{};
+    for (int i = 0; i < 24; ++i) nonce[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(i);
+    std::array<std::uint8_t, 16> tag{};
+    crypto::xchacha_seal(seq(32), nonce, str("ad"), msg.data(), msg.size(), tag.data());
+    msg.insert(msg.end(), tag.begin(), tag.end());
+    CHECK_HEX(msg, "f6a76313fff2fac1412842aa537f511ffdea94f0939d4b12c6cef8");
+
+    crypto::HmacSha512 mac(seq(64));
+    mac.update(str("abc"));
+    CHECK_HEX(mac.finish(), "6676a206912b5136ef92d5345fb1d39848bdce03485cc2ec0761505d0659ba2f32445f2e2783096f004e4960e4ab9b35faf57d6041f7604526d5f94cf75021bd");
+}
+
 void test_known_answer() {
     // tests/data/kat_v7.dat = v7_reference.encrypt_bytes(...) with fixed salt/IVs
     const auto expected = read_all(kData / "kat_v7.dat");
@@ -336,6 +398,7 @@ void bench() {
 
 int main(int argc, char** argv) {
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
+        {"primitives vs. PyCryptodome / argon2-cffi", test_primitives},
         {"known-answer vector (Python reference)", test_known_answer},
         {"decrypt files made by the Python tool", test_python_fixtures},
         {"round-trip at chunk boundaries", test_roundtrip_sizes},
