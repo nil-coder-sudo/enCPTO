@@ -58,14 +58,26 @@ target_include_directories(argon2_static
     PRIVATE ${argon2_SOURCE_DIR}/src)
 target_link_libraries(argon2_static PRIVATE Threads::Threads)
 set_target_properties(argon2_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-# A static libsodium (e.g. vcpkg on Windows) exports its own argon2_* symbols;
-# give ours a private prefix so both can be linked into one binary.
+# A static libsodium (vcpkg on Windows) exports its own argon2_* and, in some
+# versions, unprefixed blake2b_* symbols with a *different* state layout.
+# Prefix every external symbol of the bundled Argon2 so the linker can never
+# mix the two implementations (which silently produced wrong hashes on MSVC).
 foreach(sym argon2_ctx argon2_hash argon2_verify argon2_verify_ctx argon2_error_message
             argon2_encodedlen argon2_type2string
             argon2i_ctx argon2i_hash_encoded argon2i_hash_raw argon2i_verify argon2i_verify_ctx
             argon2d_ctx argon2d_hash_encoded argon2d_hash_raw argon2d_verify argon2d_verify_ctx
             argon2id_ctx argon2id_hash_encoded argon2id_hash_raw argon2id_verify argon2id_verify_ctx)
     target_compile_definitions(argon2_static PUBLIC ${sym}=encpto_${sym})
+endforeach()
+foreach(sym blake2b blake2b_init blake2b_init_key blake2b_init_param blake2b_update
+            blake2b_final blake2b_long
+            initialize finalize validate_inputs fill_memory_blocks fill_segment index_alpha
+            allocate_memory free_memory secure_wipe_memory clear_internal_memory
+            fill_first_blocks initial_hash init_block_value copy_block xor_block
+            encode_string decode_string b64len numlen
+            argon2_thread_create argon2_thread_join argon2_thread_exit
+            FLAG_clear_internal_memory)
+    target_compile_definitions(argon2_static PRIVATE ${sym}=encpto_argon2_${sym})
 endforeach()
 if(MSVC)
     target_compile_options(argon2_static PRIVATE /W0)
