@@ -1,0 +1,24 @@
+# Build output
+/build*/
+/out/
+/cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+/vcpkg_installed/
+
+# IDEs / OS
+.vs/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Python (legacy tool)
+__pycache__/
+*.pyc
+.venv/
+
+# Never commit encrypted test output except the fixtures
+*.dat
+!tests/data/*.dat
