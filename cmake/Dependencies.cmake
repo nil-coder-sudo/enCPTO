@@ -58,6 +58,15 @@ target_include_directories(argon2_static
     PRIVATE ${argon2_SOURCE_DIR}/src)
 target_link_libraries(argon2_static PRIVATE Threads::Threads)
 set_target_properties(argon2_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# A static libsodium (e.g. vcpkg on Windows) exports its own argon2_* symbols;
+# give ours a private prefix so both can be linked into one binary.
+foreach(sym argon2_ctx argon2_hash argon2_verify argon2_verify_ctx argon2_error_message
+            argon2_encodedlen argon2_type2string
+            argon2i_ctx argon2i_hash_encoded argon2i_hash_raw argon2i_verify argon2i_verify_ctx
+            argon2d_ctx argon2d_hash_encoded argon2d_hash_raw argon2d_verify argon2d_verify_ctx
+            argon2id_ctx argon2id_hash_encoded argon2id_hash_raw argon2id_verify argon2id_verify_ctx)
+    target_compile_definitions(argon2_static PUBLIC ${sym}=encpto_${sym})
+endforeach()
 if(MSVC)
     target_compile_options(argon2_static PRIVATE /W0)
 else()
