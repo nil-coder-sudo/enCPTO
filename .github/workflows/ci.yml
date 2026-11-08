@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - { name: Linux (GCC, system Qt), os: ubuntu-24.04 }
-          - { name: macOS (Apple Silicon),  os: macos-14 }
+          - { name: macOS (Apple Silicon),  os: macos-15 }
           - { name: Windows (MSVC),         os: windows-2022 }
 
     env:
