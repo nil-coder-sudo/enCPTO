@@ -56,6 +56,38 @@ Measured on the same 2-vCPU cloud VM, same files, same password; machines with m
 Every operation includes a fixed ~0.5 s for Argon2id — that is deliberate, it is what makes password guessing expensive.
 CI prints a fresh benchmark for every platform in the *Benchmark* step.
 
+### Measure your own machine
+
+**Settings → Experimental → Run benchmark** (or `encpto-cli bench`) times every stage on your computer
+and names the one that limits end-to-end speed:
+
+<p align="center"><img src="docs/images/benchmark-light.png" width="70%" alt="Benchmark results with the bottleneck highlighted"></p>
+<p align="center"><sub>2-vCPU cloud VM. The “GPU” rows are PoCL running OpenCL on those same two CPU cores, not a graphics card.</sub></p>
+
+On most machines the bottleneck is **HMAC-SHA512**: the V7 format authenticates the whole file with one
+HMAC, which has to be computed from start to end on a single core. The cipher layers run several times
+faster than that, so neither more cores nor a GPU can push a single file past the HMAC speed.
+
+## Experimental: GPU acceleration
+
+**Settings → Experimental → Use GPU acceleration** (or `--gpu` on the command line) runs both cipher
+layers on an OpenCL device — NVIDIA, AMD, Intel or Apple. One kernel produces the AES-256-CTR and ChaCha20
+keystreams together, so each 4 MiB chunk crosses the bus once in each direction; Poly1305 and HMAC stay on
+the CPU. Encrypted files are **byte-identical** to the CPU path (checked in CI on every push).
+
+Things to know before turning it on:
+
+- **It rarely makes things faster.** See the benchmark above: the cipher layers are not the bottleneck.
+  It is here for people who want to see for themselves.
+- **Keys and data pass through graphics memory**, which cannot be locked like system memory and is not
+  guaranteed to be cleared by the driver (cf. [LeftoverLocals, CVE-2023-4969](https://nvd.nist.gov/vuln/detail/CVE-2023-4969)).
+  enCPTO zero-fills every device buffer after use, but cannot control what the driver does.
+- The GPU uses table-based AES, which is not constant-time; on a shared GPU another process could in
+  principle measure timing. The CPU path uses AES-NI and has no such issue.
+- OpenCL is loaded at run time. Without a driver the switch is simply greyed out.
+
+`encpto-cli gpu` lists the devices; `--device N` picks one.
+
 ## Command line
 
 ```bash
@@ -64,6 +96,7 @@ encpto-cli encrypt "My Folder" -o backup.dat --shred
 encpto-cli decrypt backup.dat -o restored/     # restores "My Folder" under its original name
 encpto-cli info backup.dat
 encpto-cli genpass --length 32 --no-ambiguous
+encpto-cli bench --gpu                         # time every stage, find the bottleneck
 ```
 
 `--password-stdin` reads the password from the first line of standard input for scripting.
@@ -72,7 +105,7 @@ Exit codes: `0` success, `3` wrong password, `4` damaged or modified file, `130`
 ## Building from source
 
 Requirements: CMake ≥ 3.21, a C++20 compiler, OpenSSL 3, libsodium, Qt ≥ 6.4 (Widgets, Svg).
-Argon2, libdeflate and miniz are fetched automatically at a pinned version.
+Argon2, libdeflate, miniz and the OpenCL headers are fetched automatically at a pinned version.
 
 ```bash
 # Debian / Ubuntu

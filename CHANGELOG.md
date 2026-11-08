@@ -1,5 +1,19 @@
 # Changelog
 
+## 8.1.0
+
+### New
+- **Experimental GPU acceleration (OpenCL)**: Settings → Experimental, or `--gpu`. Both cipher layers run in
+  one kernel on NVIDIA / AMD / Intel / Apple devices; output is byte-identical to the CPU path. OpenCL is
+  loaded at run time, so nothing changes on machines without a driver. Read the README before enabling it.
+- **Built-in benchmark**: Settings → Experimental → Run benchmark, or `encpto-cli bench`. Times every stage
+  on your machine and names the bottleneck.
+- `encpto-cli gpu` lists OpenCL devices.
+
+### Faster
+- Layer 2 (XChaCha20-Poly1305) now runs on OpenSSL's hand-written AVX-512 / AVX2 / NEON assembly:
+  about 2.5× faster for that layer, same bytes. Mostly noticeable on 2–4 core machines.
+
 ## 8.0.0
 
 A native C++ rewrite. Containers stay in the V7 format: files made by v7.0 open in 8.0 and vice versa.

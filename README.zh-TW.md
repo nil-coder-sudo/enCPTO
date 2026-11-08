@@ -50,6 +50,28 @@ v8 把加解密分散到所有 CPU 核心，並讓（必須依序計算的）HMA
 每次操作都包含約 0.5 秒的 Argon2id 計算——這是刻意的，正是它讓猜密碼變得昂貴。
 CI 的 *Benchmark* 步驟會在每個平台印出最新數據。
 
+### 測測你自己的電腦
+
+**設定 → 實驗性功能 → 開始測速**（或 `encpto-cli bench`）會量出每個環節在你電腦上的速度，並標出限制整體速度的瓶頸：
+
+<p align="center"><img src="docs/images/benchmark-light.png" width="70%" alt="測速結果，瓶頸以紅色標示"></p>
+<p align="center"><sub>2 vCPU 雲端主機。「GPU」那兩列是 PoCL 在同樣兩顆 CPU 核心上模擬 OpenCL，並不是真正的顯示卡。</sub></p>
+
+在大多數電腦上，瓶頸都是 **HMAC-SHA512**：V7 格式用一個 HMAC 驗證整個檔案，它必須從頭到尾只用一個核心依序計算。加密層本身比它快好幾倍，所以不論加多少核心或用 GPU，單一檔案都很難超過 HMAC 的速度。
+
+## 實驗性功能：GPU 加速
+
+**設定 → 實驗性功能 → 使用 GPU 加速**（命令列加 `--gpu`）會把兩層加密放到 OpenCL 裝置上執行，支援 NVIDIA、AMD、Intel 與 Apple。一個 kernel 同時產生 AES-256-CTR 與 ChaCha20 的金鑰流，每個 4 MiB 區塊只需往返一次；Poly1305 與 HMAC 仍在 CPU 上計算。產生的加密檔與 CPU 路徑**逐位元組相同**，每次推送都由 CI 驗證。
+
+開啟前請先了解：
+
+- **多數情況不會比較快。** 原因見上方測速：加密層不是瓶頸。這個功能是給想親手驗證的人玩的。
+- **金鑰與資料會經過顯示卡記憶體**：它無法像系統記憶體一樣鎖定，驅動程式也不保證會清除（參考 [LeftoverLocals，CVE-2023-4969](https://nvd.nist.gov/vuln/detail/CVE-2023-4969)）。enCPTO 用完會主動把所有 GPU 緩衝區歸零，但無法控制驅動程式本身的行為。
+- GPU 上的 AES 使用查表實作，不是固定時間；在多人共用的 GPU 上，理論上其他程式可能藉由量測時間取得資訊。CPU 路徑使用 AES-NI，沒有這個問題。
+- OpenCL 在執行時才載入；沒有驅動程式時，這個選項會呈現灰色無法勾選。
+
+`encpto-cli gpu` 可列出裝置，`--device N` 可指定要用哪一個。
+
 ## 命令列
 
 ```bash
@@ -58,6 +80,7 @@ encpto-cli encrypt "My Folder" -o backup.dat --shred
 encpto-cli decrypt backup.dat -o restored/     # 以原始名稱還原 "My Folder"
 encpto-cli info backup.dat
 encpto-cli genpass --length 32 --no-ambiguous
+encpto-cli bench --gpu                         # 量測每個環節，找出瓶頸
 ```
 
 `--password-stdin` 會從標準輸入的第一行讀取密碼，方便寫腳本。
