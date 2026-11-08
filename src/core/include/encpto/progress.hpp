@@ -36,6 +36,12 @@ struct Options {
     const std::atomic_bool* cancel = nullptr;
     /// Argon2id profile used for *new* containers (stored in the header).
     v7::KdfParams kdf{};
+    /// EXPERIMENTAL: run both cipher layers' keystreams on an OpenCL device.
+    /// Output is byte-identical to the CPU path. Throws Error(ErrorCode::Gpu)
+    /// if no usable device exists.
+    bool use_gpu = false;
+    /// gpu::Device::index, or -1 for gpu::default_device().
+    int gpu_device = -1;
 
     void report(Phase phase, std::uint64_t done, std::uint64_t total) const {
         if (on_progress) {

@@ -6,6 +6,7 @@
 #include "encpto/fsutil.hpp"
 #include "encpto/secure_memory.hpp"
 #include "pipeline.hpp"
+#include "gpu/session.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -54,6 +55,77 @@ std::unique_ptr<Keys> derive_keys(std::string_view password, const v7::HeaderByt
     return keys;
 }
 
+// ── Chunk cipher (CPU or experimental GPU) ──────────────────────────────
+
+/// Both cipher layers for one container. With Options::use_gpu the keystreams
+/// come from an OpenCL device and only Poly1305 runs on the CPU; the bytes are
+/// identical either way.
+class ChunkCipher {
+public:
+    ChunkCipher(const Keys& keys, const v7::Header& header, const std::array<std::uint8_t, 64>& hdr_hash,
+                const Options& opts)
+        : keys_(keys), header_(header), hdr_hash_(hdr_hash) {
+        if (opts.use_gpu) {
+            gpu_ = std::make_unique<gpu::detail::Session>(opts.gpu_device, keys.aes(), keys.xcc(),
+                                                          header.aes_prefix, header.xcc_prefix, kGpuLanes);
+            workers_ = kGpuLanes;
+        } else {
+            workers_ = opts.worker_count();
+        }
+    }
+
+    [[nodiscard]] unsigned workers() const { return workers_; }
+
+    void seal(detail::Job& job) const {
+        const auto aad = v7::chunk_aad(hdr_hash_, job.index, job.final);
+        std::uint8_t* d = job.buffer.data();
+        if (gpu_) {
+            gpu_->xor_keystreams(job.index, d, job.length);
+            crypto::poly1305_aead_tag(gpu_->chacha_subkey(), nonce(job.index), aad, d, job.length,
+                                      d + job.length);
+            return;
+        }
+        crypto::aes256_ctr_xor(keys_.aes(), v7::aes_iv(header_.aes_prefix, static_cast<std::uint32_t>(job.index)),
+                               d, job.length);
+        crypto::xchacha_seal(keys_.xcc(), v7::xcc_nonce(header_.xcc_prefix, job.index), aad, d,
+                             job.length, d + job.length);
+    }
+
+    void open(detail::Job& job) const {
+        const auto aad = v7::chunk_aad(hdr_hash_, job.index, job.final);
+        std::uint8_t* d = job.buffer.data();
+        if (gpu_) {
+            // Authenticate first, then let the GPU strip both layers.
+            std::array<std::uint8_t, kTag> tag{};
+            crypto::poly1305_aead_tag(gpu_->chacha_subkey(), nonce(job.index), aad, d, job.length, tag.data());
+            if (!crypto::equal(tag, crypto::Bytes(d + job.length, kTag))) {
+                throw Error(ErrorCode::Tampered, "Chunk authentication failed — file tampered.");
+            }
+            gpu_->xor_keystreams(job.index, d, job.length);
+            return;
+        }
+        if (!crypto::xchacha_open(keys_.xcc(), v7::xcc_nonce(header_.xcc_prefix, job.index), aad, d,
+                                  job.length, d + job.length)) {
+            throw Error(ErrorCode::Tampered, "Chunk authentication failed — file tampered.");
+        }
+        crypto::aes256_ctr_xor(keys_.aes(), v7::aes_iv(header_.aes_prefix, static_cast<std::uint32_t>(job.index)),
+                               d, job.length);
+    }
+
+private:
+    static constexpr unsigned kGpuLanes = 4;
+
+    [[nodiscard]] std::array<std::uint8_t, 12> nonce(std::uint64_t index) const {
+        return crypto::ietf_nonce(v7::xcc_nonce(header_.xcc_prefix, index));
+    }
+
+    const Keys& keys_;
+    const v7::Header& header_;
+    const std::array<std::uint8_t, 64>& hdr_hash_;
+    std::unique_ptr<gpu::detail::Session> gpu_;
+    unsigned workers_ = 1;
+};
+
 // ── Sources & sinks ─────────────────────────────────────────────────────
 
 using ReadFn = std::function<std::size_t(std::uint8_t*, std::size_t)>;
@@ -93,8 +165,9 @@ void encrypt_stream(const ReadFn& read, std::uint64_t size, const WriteFn& write
     std::uint64_t done = 0;
     opts.report(Phase::Encrypting, 0, size);
 
+    const ChunkCipher cipher(*keys, header, hdr_hash, opts);
     detail::ChunkPipeline::run(
-        opts.worker_count(), opts.cancel,
+        cipher.workers(), opts.cancel,
         // reader: plaintext chunk i
         [&](detail::Job& job) {
             if (next_index == chunks) {
@@ -112,14 +185,7 @@ void encrypt_stream(const ReadFn& read, std::uint64_t size, const WriteFn& write
             return true;
         },
         // workers: layer 1 AES-256-CTR, layer 2 XChaCha20-Poly1305 (in place)
-        [&](detail::Job& job) {
-            const auto idx32 = static_cast<std::uint32_t>(job.index);
-            crypto::aes256_ctr_xor(keys->aes(), v7::aes_iv(header.aes_prefix, idx32),
-                                   job.buffer.data(), job.length);
-            crypto::xchacha_seal(keys->xcc(), v7::xcc_nonce(header.xcc_prefix, job.index),
-                                 v7::chunk_aad(hdr_hash, job.index, job.final), job.buffer.data(),
-                                 job.length, job.buffer.data() + job.length);
-        },
+        [&](detail::Job& job) { cipher.seal(job); },
         // caller thread: HMAC-SHA512, strictly in order
         [&](detail::Job& job) {
             mac.update(job.buffer.data(), job.length + kTag);
@@ -285,6 +351,10 @@ DecryptResult decrypt(const fs::path& in, const fs::path& out_dir, std::string_v
         throw Error(ErrorCode::Corrupted, "Size mismatch — file truncated or tampered.");
     }
 
+    // Set up the cipher (and the GPU, if requested) before the long HMAC pass,
+    // so an unavailable GPU is reported immediately.
+    const ChunkCipher cipher(*keys, header, hdr_hash, opts);
+
     // 2) Whole-file HMAC-SHA512 before a single byte of plaintext is written.
     {
         crypto::HmacSha512 mac(keys->mac());
@@ -373,7 +443,7 @@ DecryptResult decrypt(const fs::path& in, const fs::path& out_dir, std::string_v
     opts.report(Phase::Decrypting, 0, body_size);
 
     detail::ChunkPipeline::run(
-        opts.worker_count(), opts.cancel,
+        cipher.workers(), opts.cancel,
         [&](detail::Job& job) {
             if (remaining == 0) {
                 return false;
@@ -391,17 +461,7 @@ DecryptResult decrypt(const fs::path& in, const fs::path& out_dir, std::string_v
             job.final = remaining == 0;
             return true;
         },
-        [&](detail::Job& job) {
-            if (!crypto::xchacha_open(keys->xcc(), v7::xcc_nonce(header.xcc_prefix, job.index),
-                                      v7::chunk_aad(hdr_hash, job.index, job.final),
-                                      job.buffer.data(), job.length,
-                                      job.buffer.data() + job.length)) {
-                throw Error(ErrorCode::Tampered, "Chunk authentication failed — file tampered.");
-            }
-            crypto::aes256_ctr_xor(keys->aes(),
-                                   v7::aes_iv(header.aes_prefix, static_cast<std::uint32_t>(job.index)),
-                                   job.buffer.data(), job.length);
-        },
+        [&](detail::Job& job) { cipher.open(job); },
         [&](detail::Job& job) {
             if (written + job.length > meta.size) {
                 throw Error(ErrorCode::Corrupted, "Size mismatch — file truncated or tampered.");
@@ -457,6 +517,25 @@ std::vector<std::uint8_t> encrypt_buffer(const std::vector<std::uint8_t>& payloa
         payload.size(), [&](const std::uint8_t* p, std::size_t n) { out.insert(out.end(), p, p + n); },
         meta, password, header, opts);
     return out;
+}
+
+void encrypt_discard(const std::vector<std::uint8_t>& source, std::uint64_t size,
+                     std::string_view password, const Options& opts) {
+    std::uint64_t pos = 0;
+    v7::Meta meta;
+    meta.name = "benchmark";
+    encrypt_stream(
+        [&](std::uint8_t* p, std::size_t n) {
+            for (std::size_t done = 0; done < n;) {
+                const std::size_t off = static_cast<std::size_t>(pos % source.size());
+                const std::size_t k = std::min(n - done, source.size() - off);
+                std::memcpy(p + done, source.data() + off, k);
+                done += k;
+                pos += k;
+            }
+            return n;
+        },
+        size, [](const std::uint8_t*, std::size_t) {}, meta, password, random_header(opts), opts);
 }
 
 }  // namespace detail

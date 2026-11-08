@@ -130,7 +130,7 @@ QPushButton#Tab:checked { color: %TEXT%; border-bottom: 2px solid %ACCENT%; }
 
 #Panel { background: %SURF%; border: 1px solid %LINE%; border-radius: 10px; }
 #PanelTitle { font-size: 15px; font-weight: 700; }
-#SectionTitle { font-size: 14px; font-weight: 700; padding-top: 6px; }
+#SectionTitle { font-size: 14px; font-weight: 700; padding: 6px 0px 0px 0px; margin: 0px; }
 #Dim, QLabel[dim="true"] { color: %DIM%; }
 #Small { color: %DIM%; font-size: 12px; }
 #SourceName { font-size: 15px; font-weight: 700; }

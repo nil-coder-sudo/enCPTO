@@ -1,6 +1,8 @@
 // encpto-cli — command-line front end for the enCPTO engine.
 
+#include <encpto/bench.hpp>
 #include <encpto/engine.hpp>
+#include <encpto/gpu.hpp>
 #include <encpto/fsutil.hpp>
 #include <encpto/password.hpp>
 #include <encpto/secure_memory.hpp>
@@ -43,10 +45,14 @@ Usage:
   encpto-cli info    <file.dat>
   encpto-cli genpass [--length N] [--no-upper] [--no-lower] [--no-digits]
                      [--no-symbols] [--no-ambiguous]
+  encpto-cli bench   [--gpu] [--size MiB] [-t N]   measure every stage on this machine
+  encpto-cli gpu                                    list OpenCL devices
 
 Options:
   -o, --output PATH     output file (encrypt) or folder (decrypt)
   -t, --threads N       worker threads (default: all cores)
+      --gpu             EXPERIMENTAL: run both cipher layers on an OpenCL device
+      --device N        OpenCL device index (see `encpto-cli gpu`)
       --password-stdin  read the password from the first line of stdin
       --shred           securely shred the source after encrypting
   -q, --quiet           no progress output
@@ -64,6 +70,9 @@ struct Args {
     bool password_stdin = false;
     bool shred = false;
     bool quiet = false;
+    bool gpu = false;
+    int device = -1;
+    std::size_t size_mib = 512;
     password::GeneratorOptions gen;
 };
 
@@ -90,6 +99,13 @@ Args parse(int argc, char** argv) {
             a.output = value();
         } else if (s == "-t" || s == "--threads") {
             a.threads = static_cast<unsigned>(std::stoul(value()));
+        } else if (s == "--gpu") {
+            a.gpu = true;
+        } else if (s == "--device") {
+            a.device = std::stoi(value());
+            a.gpu = true;
+        } else if (s == "--size") {
+            a.size_mib = static_cast<std::size_t>(std::stoul(value()));
         } else if (s == "--password-stdin") {
             a.password_stdin = true;
         } else if (s == "--shred") {
@@ -290,6 +306,8 @@ int cmd_encrypt(const Args& a) {
     opts.threads = a.threads;
     opts.cancel = &g_cancel;
     opts.on_progress = make_progress(a.quiet);
+    opts.use_gpu = a.gpu;
+    opts.gpu_device = a.device;
     const auto t0 = std::chrono::steady_clock::now();
     try {
         if (is_dir) encrypt_directory(in, out, pwd, opts);
@@ -322,6 +340,8 @@ int cmd_decrypt(const Args& a) {
     opts.threads = a.threads;
     opts.cancel = &g_cancel;
     opts.on_progress = make_progress(a.quiet);
+    opts.use_gpu = a.gpu;
+    opts.gpu_device = a.device;
     DecryptResult r;
     try {
         r = decrypt(in, out_dir, pwd, opts);
@@ -362,6 +382,75 @@ int cmd_genpass(const Args& a) {
     return 0;
 }
 
+int cmd_gpu() {
+    const auto& st = gpu::probe();
+    if (st.devices.empty()) {
+        std::cout << "No usable OpenCL device: " << st.message << "\n";
+        return 1;
+    }
+    const int def = gpu::default_device();
+    for (const auto& d : st.devices) {
+        std::cout << (d.index == def ? "* " : "  ") << d.index << "  " << d.name << "  ["
+                  << (d.is_gpu ? "GPU" : "CPU/other") << ", " << d.compute_units << " compute units, "
+                  << fsutil::human_size(d.memory) << "]  " << d.platform << "\n";
+    }
+    std::cout << "\n* = used by default. Choose another with --device N.\n";
+    return 0;
+}
+
+const char* stage_name(bench::StageId id) {
+    switch (id) {
+        case bench::StageId::Argon2id: return "Argon2id key derivation";
+        case bench::StageId::AesOneCore: return "AES-256-CTR, 1 core";
+        case bench::StageId::ChaChaOneCore: return "XChaCha20-Poly1305, 1 core";
+        case bench::StageId::Hmac: return "HMAC-SHA512 (sequential)";
+        case bench::StageId::LayersCpu: return "Both layers, all cores";
+        case bench::StageId::LayersGpu: return "Both layers, GPU";
+        case bench::StageId::PipelineCpu: return "Whole pipeline, CPU";
+        case bench::StageId::PipelineGpu: return "Whole pipeline, GPU";
+    }
+    return "";
+}
+
+int cmd_bench(const Args& a) {
+    bench::Settings st;
+    st.mib = a.size_mib;
+    st.threads = a.threads;
+    st.gpu = a.gpu;
+    st.gpu_device = a.device;
+    st.cancel = &g_cancel;
+    if (!a.quiet) {
+        st.on_step = [](int step, int total) {
+            std::fprintf(stderr, "\r  measuring… %d/%d", step, total);
+            std::fflush(stderr);
+        };
+    }
+    const auto r = bench::run(st);
+    if (!a.quiet) std::cerr << "\r                      \r";
+
+    double peak = 1;
+    for (const auto& s : r.stages) peak = std::max(peak, s.mib_per_s);
+    std::cout << "enCPTO " ENCPTO_VERSION " benchmark — " << r.threads << " threads, "
+              << st.mib << " MiB per stage\n\n";
+    for (const auto& s : r.stages) {
+        if (s.id == bench::StageId::Argon2id) {
+            std::printf("  %-28s %8.2f s     (fixed cost per file, by design)\n", stage_name(s.id), s.seconds);
+            continue;
+        }
+        const int bar = static_cast<int>(28.0 * s.mib_per_s / peak + 0.5);
+        std::printf("  %-28s %8.0f MiB/s  %s%s\n", stage_name(s.id), s.mib_per_s,
+                    std::string(static_cast<std::size_t>(bar), '#').c_str(),
+                    s.id == r.bottleneck ? "  <- bottleneck" : "");
+    }
+    if (!r.gpu_device.empty()) std::cout << "\n  GPU: " << r.gpu_device << "\n";
+    if (!r.gpu_error.empty()) std::cout << "\n  GPU skipped: " << r.gpu_error << "\n";
+    if (r.bottleneck == bench::StageId::Hmac) {
+        std::cout << "\n  The whole-file HMAC-SHA512 is computed in order on one core, so it caps\n"
+                     "  end-to-end speed no matter how fast the cipher layers run.\n";
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -375,6 +464,8 @@ int main(int argc, char** argv) {
         if (a.command == "decrypt") return cmd_decrypt(a);
         if (a.command == "info") return cmd_info(a);
         if (a.command == "genpass") return cmd_genpass(a);
+        if (a.command == "bench") return cmd_bench(a);
+        if (a.command == "gpu") return cmd_gpu();
         usage_error("unknown command '" + a.command + "'");
     } catch (const Error& e) {
         std::cerr << "\nerror: " << e.what() << "\n";

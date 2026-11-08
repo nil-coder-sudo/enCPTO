@@ -5,7 +5,9 @@
 #                              Qt 6       (GUI only)
 #   Fetched at configure time: Argon2 reference implementation (supports p > 1,
 #                              which libsodium does not), libdeflate (fast SIMD
-#                              DEFLATE + CRC-32), miniz (ZIP container I/O)
+#                              DEFLATE + CRC-32), miniz (ZIP container I/O),
+#                              Khronos OpenCL headers (the runtime itself is
+#                              loaded with dlopen/LoadLibrary at run time)
 include(FetchContent)
 set(CMAKE_POLICY_DEFAULT_CMP0135 NEW)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -88,7 +90,8 @@ endif()
 # ── miniz (ZIP) ──────────────────────────────────────────────────────────
 FetchContent_Declare(miniz
     URL      https://github.com/richgel999/miniz/releases/download/3.1.2/miniz-3.1.2.zip
-    URL_HASH SHA256=f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a)
+    URL_HASH SHA256=f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(miniz)
 
 add_library(miniz_static STATIC ${miniz_SOURCE_DIR}/miniz.c)
@@ -112,3 +115,9 @@ FetchContent_Declare(libdeflate
     GIT_REPOSITORY https://github.com/ebiggers/libdeflate.git
     GIT_TAG        c8c56a20f8f621e6a966b716b31f1dedab6a41e3)   # v1.25
 FetchContent_MakeAvailable(libdeflate)
+
+# ── OpenCL headers (experimental GPU path; header-only) ─────────────────
+FetchContent_Declare(opencl_headers
+    GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-Headers.git
+    GIT_TAG        8a97ebc88daa3495d6f57ec10bb515224400186f)   # v2025.07.22
+FetchContent_MakeAvailable(opencl_headers)

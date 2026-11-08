@@ -115,6 +115,85 @@ void StrengthMeter::paintEvent(QPaintEvent*) {
     }
 }
 
+// ── BenchChart ──────────────────────────────────────────────────────────
+
+namespace {
+constexpr int kRowHeight = 30;
+}
+
+BenchChart::BenchChart(QWidget* parent) : QWidget(parent) {
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+}
+
+void BenchChart::setRows(std::vector<Row> rows) {
+    rows_ = std::move(rows);
+    setFixedHeight(static_cast<int>(rows_.size()) * kRowHeight);
+    update();
+}
+
+void BenchChart::paintEvent(QPaintEvent*) {
+    const auto& p = theme::current();
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    QFontMetrics fm(font());
+
+    int labelW = 0;
+    for (const auto& r : rows_) labelW = std::max(labelW, fm.horizontalAdvance(r.label));
+    labelW += 16;
+    const int valueW = fm.horizontalAdvance(QStringLiteral("00000 MiB/s")) + 12;
+    const int tagW = bottleneckLabel_.isEmpty() ? 0 : fm.horizontalAdvance(bottleneckLabel_) + 18;
+    const int barX = labelW;
+    const int barW = std::max(40, width() - labelW - valueW - tagW);
+
+    double peak = 1;
+    for (const auto& r : rows_) {
+        if (r.kind != Kind::Info) peak = std::max(peak, r.value);
+    }
+
+    for (std::size_t i = 0; i < rows_.size(); ++i) {
+        const Row& r = rows_[i];
+        const int y = static_cast<int>(i) * kRowHeight;
+        const QRect labelRect(0, y, labelW - 8, kRowHeight);
+        QFont f = font();
+        f.setBold(r.kind == Kind::Total || r.kind == Kind::Bottleneck);
+        painter.setFont(f);
+        painter.setPen(r.kind == Kind::Info ? p.dim : p.text);
+        painter.drawText(labelRect, Qt::AlignLeft | Qt::AlignVCenter, r.label);
+
+        int valueX = barX;
+        if (r.kind != Kind::Info) {
+            // Track and bar
+            const QRectF track(barX, y + kRowHeight / 2.0 - 4, barW, 8);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(p.line);
+            painter.drawRoundedRect(track, 4, 4);
+            const double frac = std::clamp(r.value / peak, 0.0, 1.0);
+            const QColor c = r.kind == Kind::Bottleneck ? p.danger : r.kind == Kind::Total ? p.accent : p.frame;
+            painter.setBrush(c);
+            painter.drawRoundedRect(QRectF(track.x(), track.y(), std::max(8.0, track.width() * frac), track.height()), 4, 4);
+            valueX = barX + barW + 10;
+        }
+        painter.setPen(r.kind == Kind::Info ? p.dim : p.text);
+        painter.setFont(f);
+        painter.drawText(QRect(valueX, y, valueW + (r.kind == Kind::Info ? barW : 0), kRowHeight),
+                         Qt::AlignLeft | Qt::AlignVCenter, r.valueText);
+        if (r.kind == Kind::Bottleneck && tagW > 0) {
+            QFont tf = font();
+            tf.setPointSizeF(std::max(7.0, tf.pointSizeF() - 1));
+            tf.setBold(true);
+            painter.setFont(tf);
+            const QRect tag(width() - tagW + 6, y + 6, tagW - 6, kRowHeight - 12);
+            painter.setPen(Qt::NoPen);
+            QColor bg = p.danger;
+            bg.setAlpha(40);
+            painter.setBrush(bg);
+            painter.drawRoundedRect(tag, 4, 4);
+            painter.setPen(p.danger);
+            painter.drawText(tag, Qt::AlignCenter, bottleneckLabel_);
+        }
+    }
+}
+
 // ── Panel ───────────────────────────────────────────────────────────────
 
 Panel::Panel(QWidget* parent) : QFrame(parent) { setObjectName("Panel"); }

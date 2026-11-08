@@ -9,12 +9,16 @@
 #include <encpto/engine.hpp>
 #include <encpto/file.hpp>
 #include <encpto/fsutil.hpp>
+#include <encpto/gpu.hpp>
 #include <encpto/password.hpp>
 #include <encpto/shred.hpp>
 
 #include <miniz.h>
 
+#include "gpu/session.hpp"
+
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -373,6 +377,97 @@ void test_shred() {
     CHECK(!fs::exists(t.path / "d"));
 }
 
+void test_aes_key_schedule() {
+    // FIPS-197 Appendix A.3
+    std::array<std::uint8_t, 32> key{};
+    const char* hexkey = "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4";
+    for (std::size_t i = 0; i < 32; ++i) {
+        key[i] = static_cast<std::uint8_t>(std::stoi(std::string(hexkey + 2 * i, 2), nullptr, 16));
+    }
+    const auto w = gpu::detail::aes256_expand_key(key);
+    CHECK(w[8] == 0x9ba35411U);
+    CHECK(w[56] == 0xfe4890d1U && w[57] == 0xe6188d0bU && w[58] == 0x046df344U && w[59] == 0x706c631eU);
+}
+
+bool gpu_available() {
+    const auto& st = gpu::probe();
+    if (!st.devices.empty()) {
+        const auto& d = st.devices[static_cast<std::size_t>(gpu::default_device())];
+        std::cout << "  OpenCL device: " << d.name << " (" << d.platform << ")\n";
+        return true;
+    }
+    std::cout << "  skipped: " << st.message << "\n";
+    if (const char* req = std::getenv("ENCPTO_REQUIRE_GPU"); req != nullptr && *req == '1') {
+        ++g_failures;
+        std::cerr << "  FAILED: ENCPTO_REQUIRE_GPU=1 but no OpenCL device\n";
+    }
+    return false;
+}
+
+void test_gpu_matches_cpu() {
+    if (!gpu_available()) return;
+    // Byte-exact against the known-answer vector produced by Python.
+    const auto expected = read_all(kData / "kat_v7.dat");
+    const auto header = v7::Header::parse(std::span(expected).first(v7::kHeaderSize));
+    std::vector<std::uint8_t> payload(1000);
+    for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<std::uint8_t>((i * 7 + 3) & 0xFF);
+    v7::Meta meta;
+    meta.name = "kat.txt";
+    Options g;
+    g.use_gpu = true;
+    CHECK(detail::encrypt_buffer(payload, meta, kPwd, header, g) == expected);
+
+    // Every boundary: partial 64-byte segments, chunk edges, multi-chunk.
+    const std::size_t C = v7::kChunkSize;
+    v7::Header h = v7::Header::parse(std::span(expected).first(v7::kHeaderSize));
+    h.kdf = {1, 65536, 1};
+    for (const std::size_t size : {std::size_t{0}, std::size_t{1}, std::size_t{63}, std::size_t{64},
+                                   std::size_t{65}, std::size_t{4095}, C - 1, C, C + 1, 3 * C + 17}) {
+        const auto data = random_data(size);
+        Options cpu;
+        Options gpu_opts;
+        gpu_opts.use_gpu = true;
+        const auto a = detail::encrypt_buffer(data, meta, kPwd, h, cpu);
+        const auto b = detail::encrypt_buffer(data, meta, kPwd, h, gpu_opts);
+        CHECK(a == b);
+    }
+
+    // GPU encrypt → CPU decrypt, CPU encrypt → GPU decrypt, tamper on GPU decrypt
+    TempDir t;
+    const auto data = random_data(2 * C + 333);
+    write_all(t.path / "g.bin", data);
+    auto go = fast_opts();
+    go.use_gpu = true;
+    encrypt_file(t.path / "g.bin", t.path / "g.dat", kPwd, go);
+    CHECK(read_all(decrypt(t.path / "g.dat", t.path / "cpu", kPwd).path) == data);
+    encrypt_file(t.path / "g.bin", t.path / "c.dat", kPwd, fast_opts());
+    CHECK(read_all(decrypt(t.path / "c.dat", t.path / "gpu", kPwd, go).path) == data);
+    auto bad = read_all(t.path / "c.dat");
+    bad[v7::kHeaderSize + v7::kMetaSize + 5] ^= 0x40;
+    write_all(t.path / "bad.dat", bad);
+    CHECK(expect_error([&] { decrypt(t.path / "bad.dat", t.path / "x", kPwd, go); }) == ErrorCode::Tampered);
+    // Regression: concurrent kernel completions once crashed PoCL (~20% of
+    // 2-chunk runs). Repeat the pattern so CI would catch a regression.
+    const auto two = random_data(C + 999);
+    for (int i = 0; i < 25; ++i) {
+        auto o = fast_opts();
+        o.use_gpu = true;
+        v7::Meta m;
+        m.name = "r";
+        CHECK(detail::encrypt_buffer(two, m, kPwd, h, o) == detail::encrypt_buffer(two, m, kPwd, h, fast_opts()));
+    }
+}
+
+void test_gpu_unavailable_device() {
+    Options o = fast_opts();
+    o.use_gpu = true;
+    o.gpu_device = 999;
+    TempDir t;
+    write_all(t.path / "a", random_data(10));
+    CHECK(expect_error([&] { encrypt_file(t.path / "a", t.path / "a.dat", kPwd, o); }) == ErrorCode::Gpu);
+    CHECK(!fs::exists(t.path / "a.dat"));
+}
+
 void bench() {
     // Not a test: prints throughput so CI logs show the speed-up.
     TempDir t;
@@ -410,6 +505,9 @@ int main(int argc, char** argv) {
         {"inspect / legacy detection", test_inspect_and_legacy},
         {"cancellation", test_cancel},
         {"shredder", test_shred},
+        {"AES-256 key schedule (FIPS-197)", test_aes_key_schedule},
+        {"GPU output is byte-identical to CPU", test_gpu_matches_cpu},
+        {"GPU: missing device is reported", test_gpu_unavailable_device},
     };
     for (const auto& [name, fn] : tests) {
         const int before = g_failures;

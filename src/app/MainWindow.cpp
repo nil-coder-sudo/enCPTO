@@ -6,6 +6,7 @@
 #include "Widgets.hpp"
 
 #include <encpto/engine.hpp>
+#include <encpto/gpu.hpp>
 #include <encpto/fsutil.hpp>
 #include <encpto/password.hpp>
 #include <encpto/secure_memory.hpp>
@@ -35,6 +36,7 @@
 #include <QScrollArea>
 #include <QSlider>
 #include <QStackedWidget>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -484,6 +486,66 @@ QWidget* MainWindow::buildSettingsPage() {
     v->addWidget(rule());
     v->addSpacing(6);
 
+    // Experimental: GPU + benchmark
+    setExperimental_ = label("PanelTitle");
+    v->addWidget(setExperimental_);
+    gpuEnable_ = new QCheckBox;
+    gpuEnable_->setCursor(Qt::PointingHandCursor);
+    gpuEnable_->setChecked(prefs.gpuEnabled);
+    v->addWidget(gpuEnable_);
+    auto* devRow = new QHBoxLayout;
+    devRow->setContentsMargins(26, 0, 0, 0);
+    gpuDeviceLabel_ = label();
+    gpuDeviceBox_ = new QComboBox;
+    gpuDeviceBox_->setMinimumWidth(280);
+    devRow->addWidget(gpuDeviceLabel_);
+    devRow->addSpacing(12);
+    devRow->addWidget(gpuDeviceBox_, 1);
+    v->addLayout(devRow);
+    gpuStatus_ = label("Small", true);
+    gpuStatus_->setContentsMargins(26, 0, 0, 0);
+    v->addWidget(gpuStatus_);
+    gpuWarning_ = label("Small", true);
+    gpuWarning_->setContentsMargins(26, 0, 0, 0);
+    v->addWidget(gpuWarning_);
+
+    v->addSpacing(8);
+    benchTitle_ = label("SectionTitle");
+    v->addWidget(benchTitle_);
+    benchIntro_ = label("Small", true);
+    v->addWidget(benchIntro_);
+    auto* benchRow = new QHBoxLayout;
+    benchRun_ = new QPushButton;
+    benchRun_->setCursor(Qt::PointingHandCursor);
+    benchRow->addWidget(benchRun_);
+    benchRow->addStretch();
+    v->addLayout(benchRow);
+    benchChart_ = new BenchChart;
+    benchChart_->setVisible(false);
+    v->addSpacing(4);
+    v->addWidget(benchChart_);
+    benchSummary_ = label(QString(), true);
+    benchSummary_->setVisible(false);
+    v->addWidget(benchSummary_);
+    benchDetails_ = label("Small", true);
+    benchDetails_->setVisible(false);
+    v->addWidget(benchDetails_);
+
+    connect(gpuEnable_, &QCheckBox::toggled, this, [this](bool on) {
+        Prefs::instance().gpuEnabled = on;
+        Prefs::instance().save();
+        refreshGpuControls();
+    });
+    connect(gpuDeviceBox_, &QComboBox::activated, this, [this](int i) {
+        Prefs::instance().gpuDevice = gpuDeviceBox_->itemData(i).toInt();
+        Prefs::instance().save();
+    });
+    connect(benchRun_, &QPushButton::clicked, this, &MainWindow::runBenchmark);
+
+    v->addSpacing(10);
+    v->addWidget(rule());
+    v->addSpacing(6);
+
     // About
     setAbout_ = label("PanelTitle");
     v->addWidget(setAbout_);
@@ -587,6 +649,8 @@ void MainWindow::applyTheme() {
     drop_->setPanelOpacity(prefs.widgetOpacity);
     refreshIcons();
     updatePasswordFeedback();
+    refreshGpuControls();
+    showBenchmark();
     background_->update();
     setStatus(status_, statusText_->text());
 }
@@ -663,6 +727,15 @@ void MainWindow::retranslate() {
     threadsLabel_->setText(t("set_threads"));
     threadsBox_->setItemText(0, t("set_threads_auto", std::max(1U, std::thread::hardware_concurrency())));
     threadsHint_->setText(t("set_threads_hint"));
+    setExperimental_->setText(t("set_experimental"));
+    gpuEnable_->setText(t("gpu_enable"));
+    gpuDeviceLabel_->setText(t("gpu_device"));
+    gpuWarning_->setText(t("gpu_warning"));
+    benchTitle_->setText(t("bench_title"));
+    benchIntro_->setText(t("bench_intro"));
+    benchChart_->setBottleneckLabel(t("bench_bottleneck"));
+    refreshGpuControls();
+    showBenchmark();
     setAbout_->setText(t("set_about"));
     aboutBody_->setText(t("set_about_body", QStringLiteral(ENCPTO_VERSION)));
     aboutLink_->setText(QStringLiteral("<a href=\"https://github.com/nil-coder-sudo/enCPTO\" style=\"color:%1\">%2</a>")
@@ -708,7 +781,7 @@ void MainWindow::updatePasswordFeedback() {
 }
 
 void MainWindow::updateActions() {
-    const bool busy = task_ != nullptr;
+    const bool busy = task_ != nullptr || benchThread_ != nullptr;
     const bool container = source_ == Source::Container;
     const bool encryptable = source_ == Source::File || source_ == Source::Folder;
 
@@ -941,7 +1014,9 @@ void MainWindow::runTask(Task::Body body, bool encrypting, bool shredding) {
     taskShredding_ = shredding;
     lastPhase_ = -1;
     lastResult_.clear();
-    task_ = new Task(std::move(body), static_cast<unsigned>(Prefs::instance().threads), this);
+    const Task::Settings settings = taskSettings();
+    taskGpu_ = settings.gpu;
+    task_ = new Task(std::move(body), settings, this);
     connect(task_, &Task::progress, this, &MainWindow::onProgress);
     connect(task_, &Task::succeeded, this, &MainWindow::onSucceeded);
     connect(task_, &Task::failed, this, &MainWindow::onFailed);
@@ -954,7 +1029,9 @@ void MainWindow::runTask(Task::Body body, bool encrypting, bool shredding) {
 void MainWindow::onProgress(int phase, double fraction, double rate) {
     if (phase != lastPhase_) {
         lastPhase_ = phase;
-        setStatus(Status::Busy, t(phaseKey(phase)));
+        const auto ph = static_cast<Phase>(phase);
+        const bool gpuPhase = taskGpu_ && (ph == Phase::Encrypting || ph == Phase::Decrypting);
+        setStatus(Status::Busy, t(phaseKey(phase)) + (gpuPhase ? t("phase_gpu") : QString()));
     }
     progress_->setValue(static_cast<int>(fraction * 1000));
     speed_->setText(rate > 0 ? QStringLiteral("%1/s").arg(human(static_cast<std::uint64_t>(rate))) : QString());
@@ -988,6 +1065,7 @@ void MainWindow::onFailed(int code, const QString& message) {
         case ErrorCode::WrongPassword: text = t("err_wrong_password"); break;
         case ErrorCode::Tampered: text = t("err_tampered"); break;
         case ErrorCode::Corrupted: text = t("err_corrupted"); break;
+        case ErrorCode::Gpu: text = t("err_gpu", message); break;
         default: text = message; break;
     }
     setStatus(Status::Error, text);
@@ -1043,6 +1121,153 @@ void MainWindow::generatePassword() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  Experimental: GPU and benchmark
+// ═══════════════════════════════════════════════════════════════════════
+
+Task::Settings MainWindow::taskSettings() const {
+    const auto& prefs = Prefs::instance();
+    Task::Settings st;
+    st.threads = static_cast<unsigned>(prefs.threads);
+    const auto& devs = encpto::gpu::probe().devices;
+    st.gpu = prefs.gpuEnabled && !devs.empty();
+    st.gpuDevice = (prefs.gpuDevice >= 0 && prefs.gpuDevice < static_cast<int>(devs.size())) ? prefs.gpuDevice : -1;
+    return st;
+}
+
+void MainWindow::refreshGpuControls() {
+    const auto& st = encpto::gpu::probe();
+    const auto& prefs = Prefs::instance();
+    const bool any = !st.devices.empty();
+    gpuEnable_->setEnabled(any && benchThread_ == nullptr);
+    if (!any && gpuEnable_->isChecked()) {
+        const QSignalBlocker block(gpuEnable_);
+        gpuEnable_->setChecked(false);
+    }
+    gpuDeviceBox_->clear();
+    for (const auto& d : st.devices) {
+        gpuDeviceBox_->addItem(QStringLiteral("%1 (%2)").arg(QString::fromStdString(d.name),
+                                                            d.is_gpu ? t("gpu_kind_gpu") : t("gpu_kind_cpu")),
+                               d.index);
+    }
+    const int sel = gpuDeviceBox_->findData(prefs.gpuDevice >= 0 ? prefs.gpuDevice : encpto::gpu::default_device());
+    gpuDeviceBox_->setCurrentIndex(std::max(0, sel));
+    const bool on = any && gpuEnable_->isChecked();
+    gpuDeviceLabel_->setVisible(any);
+    gpuDeviceBox_->setVisible(any);
+    gpuDeviceBox_->setEnabled(on && st.devices.size() > 1);
+    gpuWarning_->setVisible(on);
+    gpuWarning_->setStyleSheet(QStringLiteral("color: %1;").arg(theme::current().warning.name()));
+    gpuStatus_->setVisible(!any);
+    gpuStatus_->setText(!st.runtime_found ? t("gpu_no_runtime") : t("gpu_no_device"));
+}
+
+void MainWindow::runBenchmark() {
+    if (benchThread_ != nullptr || task_) return;
+    benchCancel_ = false;
+    benchError_.clear();
+    benchStep_ = 0;
+    benchTotal_ = 0;
+    encpto::bench::Settings st;
+    const Task::Settings ts = taskSettings();
+    st.threads = ts.threads;
+    st.gpu = ts.gpu;
+    st.gpu_device = ts.gpuDevice;
+    st.cancel = &benchCancel_;
+    st.on_step = [this](int step, int total) {
+        QMetaObject::invokeMethod(this, [this, step, total] {
+            benchStep_ = step;
+            benchTotal_ = total;
+            benchRun_->setText(t("bench_running", step, total));
+        }, Qt::QueuedConnection);
+    };
+    benchThread_ = QThread::create([this, st] {
+        std::optional<encpto::bench::Report> report;
+        QString error;
+        try {
+            report = encpto::bench::run(st);
+        } catch (const std::exception& e) {
+            error = QString::fromUtf8(e.what());
+        }
+        QMetaObject::invokeMethod(this, [this, report, error] {
+            benchReport_ = report;
+            benchError_ = error;
+            benchThread_->wait();
+            benchThread_->deleteLater();
+            benchThread_ = nullptr;
+            benchRun_->setEnabled(true);
+            refreshGpuControls();
+            updateActions();
+            showBenchmark();
+        }, Qt::QueuedConnection);
+    });
+    benchRun_->setEnabled(false);
+    benchRun_->setText(t("bench_running", 0, ts.gpu ? 8 : 6));
+    gpuEnable_->setEnabled(false);
+    updateActions();
+    benchThread_->start(QThread::LowPriority);
+}
+
+void MainWindow::showBenchmark() {
+    using encpto::bench::StageId;
+    if (benchThread_ == nullptr) benchRun_->setText(t("bench_run"));
+    benchRun_->setIcon(theme::icon("cpu", theme::current().text, 16));
+    const auto& p = theme::current();
+    if (!benchReport_) {
+        benchChart_->setVisible(false);
+        benchSummary_->setVisible(!benchError_.isEmpty());
+        benchSummary_->setText(benchError_);
+        benchSummary_->setStyleSheet(QStringLiteral("color: %1;").arg(p.danger.name()));
+        benchDetails_->setVisible(false);
+        return;
+    }
+    const auto& r = *benchReport_;
+    const auto name = [](StageId id) -> const char* {
+        switch (id) {
+            case StageId::Argon2id: return "bench_argon2";
+            case StageId::AesOneCore: return "bench_aes";
+            case StageId::ChaChaOneCore: return "bench_chacha";
+            case StageId::Hmac: return "bench_hmac";
+            case StageId::LayersCpu: return "bench_layers_cpu";
+            case StageId::LayersGpu: return "bench_layers_gpu";
+            case StageId::PipelineCpu: return "bench_pipe_cpu";
+            case StageId::PipelineGpu: return "bench_pipe_gpu";
+        }
+        return "";
+    };
+    std::vector<BenchChart::Row> rows;
+    for (const auto& s : r.stages) {
+        BenchChart::Row row;
+        row.label = t(name(s.id));
+        if (s.id == StageId::Argon2id) {
+            row.kind = BenchChart::Kind::Info;
+            row.valueText = t("bench_seconds", QString::number(s.seconds, 'f', 2));
+        } else {
+            row.value = s.mib_per_s;
+            row.valueText = QStringLiteral("%1 MiB/s").arg(std::lround(s.mib_per_s));
+            row.kind = s.id == r.bottleneck ? BenchChart::Kind::Bottleneck
+                     : (s.id == StageId::PipelineCpu || s.id == StageId::PipelineGpu) ? BenchChart::Kind::Total
+                                                                                      : BenchChart::Kind::Stage;
+        }
+        rows.push_back(row);
+    }
+    benchChart_->setRows(std::move(rows));
+    benchChart_->setVisible(true);
+
+    const auto* hmac = r.find(StageId::Hmac);
+    benchSummary_->setStyleSheet(QString());
+    benchSummary_->setText(r.bottleneck == StageId::Hmac
+                               ? t("bench_summary_hmac", std::lround(hmac != nullptr ? hmac->mib_per_s : 0))
+                               : t("bench_summary_layers"));
+    benchSummary_->setVisible(true);
+    QStringList details{t("bench_details", r.threads, 512)};
+    if (!r.gpu_device.empty()) details << t("bench_gpu_used", QString::fromStdString(r.gpu_device));
+    else if (!r.gpu_error.empty()) details << t("bench_gpu_skipped", QString::fromStdString(r.gpu_error));
+    else if (!encpto::gpu::probe().devices.empty()) details << t("bench_gpu_hint");
+    benchDetails_->setText(details.join(QLatin1Char('\n')));
+    benchDetails_->setVisible(true);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 
 void MainWindow::closeEvent(QCloseEvent* e) {
     if (task_) {
@@ -1053,6 +1278,10 @@ void MainWindow::closeEvent(QCloseEvent* e) {
         }
         task_->cancel();
         task_->wait();
+    }
+    if (benchThread_ != nullptr) {
+        benchCancel_ = true;
+        benchThread_->wait();
     }
     Prefs::instance().save();
     e->accept();
