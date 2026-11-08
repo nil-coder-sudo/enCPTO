@@ -50,14 +50,23 @@ constexpr std::size_t kXChaChaKeyLen = 32;
 constexpr std::size_t kXChaChaNonceLen = 24;
 constexpr std::size_t kTagLen = 16;
 
-/// XChaCha20-Poly1305 (IETF), in place, detached tag (libsodium).
+/// XChaCha20-Poly1305 (IETF), in place, detached tag (OpenSSL assembly via HChaCha20).
 void xchacha_seal(Bytes key, const std::array<std::uint8_t, 24>& nonce, Bytes ad,
                   std::uint8_t* data, std::size_t size, std::uint8_t* tag_out);
 
-/// Verifies the tag, then decrypts in place. Returns false (and leaves the
-/// buffer untouched) if authentication fails.
+/// Decrypts in place and verifies the tag. Returns false (and wipes the
+/// buffer) if authentication fails.
 [[nodiscard]] bool xchacha_open(Bytes key, const std::array<std::uint8_t, 24>& nonce, Bytes ad,
                                 std::uint8_t* data, std::size_t size, const std::uint8_t* tag);
+
+/// HChaCha20 sub-key derivation (first step of XChaCha20).
+std::array<std::uint8_t, 32> hchacha20(Bytes key, Bytes nonce16);
+/// 0x00000000 ‖ xnonce[16:24] — the IETF ChaCha20 nonce used after HChaCha20.
+std::array<std::uint8_t, 12> ietf_nonce(const std::array<std::uint8_t, 24>& xnonce);
+/// RFC 8439 AEAD tag over `ad` and ciphertext `ct`, computed separately from
+/// the encryption (used by the GPU path, which only produces keystream).
+void poly1305_aead_tag(Bytes subkey, const std::array<std::uint8_t, 12>& nonce, Bytes ad,
+                       const std::uint8_t* ct, std::size_t size, std::uint8_t* tag_out);
 
 /// Constant-time comparison.
 [[nodiscard]] bool equal(Bytes a, Bytes b);

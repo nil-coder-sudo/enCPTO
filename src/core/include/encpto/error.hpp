@@ -13,6 +13,7 @@ enum class ErrorCode {
     Io,                 // file system error
     Cancelled,          // user pressed "cancel"
     InvalidArgument,
+    Gpu,                // experimental OpenCL path unavailable or failed
     Internal,
 };
 

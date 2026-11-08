@@ -10,6 +10,8 @@ add_library(encpto_core STATIC
     password.cpp
     secure_memory.cpp
     shred.cpp
+    gpu/opencl_api.cpp
+    gpu/session.cpp
 )
 add_library(encpto::core ALIAS encpto_core)
 
@@ -21,7 +23,9 @@ target_link_libraries(encpto_core
     PUBLIC  Threads::Threads
     PRIVATE OpenSSL::Crypto encpto_sodium argon2_static miniz_static
             libdeflate::libdeflate_static)
-target_compile_definitions(encpto_core PRIVATE _FILE_OFFSET_BITS=64)
+target_compile_definitions(encpto_core PRIVATE _FILE_OFFSET_BITS=64 CL_TARGET_OPENCL_VERSION=120)
+target_link_libraries(encpto_core PRIVATE OpenCL::Headers)
+target_link_libraries(encpto_core PRIVATE ${CMAKE_DL_LIBS})   # dlopen() for OpenCL
 if(WIN32)
     target_link_libraries(encpto_core PRIVATE crypt32 ws2_32 advapi32 user32 bcrypt)
 endif()
