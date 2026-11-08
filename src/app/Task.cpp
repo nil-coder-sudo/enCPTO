@@ -2,8 +2,8 @@
 
 #include <encpto/error.hpp>
 
-Task::Task(Body body, unsigned threads, QObject* parent)
-    : QThread(parent), body_(std::move(body)), threads_(threads) {}
+Task::Task(Body body, Settings settings, QObject* parent)
+    : QThread(parent), body_(std::move(body)), settings_(settings) {}
 
 void Task::onProgress(const encpto::Progress& p) {
     std::lock_guard lk(mu_);
@@ -27,7 +27,9 @@ void Task::onProgress(const encpto::Progress& p) {
 
 void Task::run() {
     encpto::Options opts;
-    opts.threads = threads_;
+    opts.threads = settings_.threads;
+    opts.use_gpu = settings_.gpu;
+    opts.gpu_device = settings_.gpuDevice;
     opts.cancel = &cancel_;
     opts.on_progress = [this](const encpto::Progress& p) { onProgress(p); };
     QElapsedTimer total;

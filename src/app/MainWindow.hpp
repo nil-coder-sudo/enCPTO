@@ -2,10 +2,17 @@
 
 #include "Task.hpp"
 
+#include <encpto/bench.hpp>
+
+#include <atomic>
+#include <optional>
+
 #include <QMainWindow>
 #include <QPointer>
 
 class BackgroundWidget;
+class BenchChart;
+class QThread;
 class DropZone;
 class Panel;
 class QAction;
@@ -64,6 +71,12 @@ private:
     void onProgress(int phase, double fraction, double rate);
     void onSucceeded(const QString& path, bool isDir, double seconds);
     void onFailed(int code, const QString& message);
+
+    // experimental
+    void refreshGpuControls();
+    void runBenchmark();
+    void showBenchmark();
+    [[nodiscard]] Task::Settings taskSettings() const;
 
     // generator
     void generatePassword();
@@ -138,6 +151,18 @@ private:
     QLabel* threadsLabel_ = nullptr;
     QComboBox* threadsBox_ = nullptr;
     QLabel* threadsHint_ = nullptr;
+    QLabel* setExperimental_ = nullptr;
+    QCheckBox* gpuEnable_ = nullptr;
+    QLabel* gpuDeviceLabel_ = nullptr;
+    QComboBox* gpuDeviceBox_ = nullptr;
+    QLabel* gpuStatus_ = nullptr;
+    QLabel* gpuWarning_ = nullptr;
+    QLabel* benchTitle_ = nullptr;
+    QLabel* benchIntro_ = nullptr;
+    QPushButton* benchRun_ = nullptr;
+    BenchChart* benchChart_ = nullptr;
+    QLabel* benchSummary_ = nullptr;
+    QLabel* benchDetails_ = nullptr;
     QLabel* setAbout_ = nullptr;
     QLabel* aboutBody_ = nullptr;
     QLabel* aboutLink_ = nullptr;
@@ -154,4 +179,12 @@ private:
     int lastPhase_ = -1;
     Status status_ = Status::Idle;
     QString lastResult_;
+    bool taskGpu_ = false;
+
+    QThread* benchThread_ = nullptr;
+    std::atomic_bool benchCancel_{false};
+    std::optional<encpto::bench::Report> benchReport_;
+    QString benchError_;
+    int benchStep_ = 0;
+    int benchTotal_ = 0;
 };

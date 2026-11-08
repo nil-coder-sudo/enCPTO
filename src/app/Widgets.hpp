@@ -5,6 +5,8 @@
 #include <QPixmap>
 #include <QWidget>
 
+#include <vector>
+
 class QPlainTextEdit;
 class QPushButton;
 class QStackedLayout;
@@ -52,6 +54,28 @@ protected:
 private:
     int filled_ = 0;
     QColor color_;
+};
+
+/// Horizontal bar chart for the benchmark results.
+class BenchChart : public QWidget {
+public:
+    enum class Kind { Stage, Total, Bottleneck, Info };
+    struct Row {
+        QString label;
+        double value = 0;   // bar length (MiB/s); ignored for Info rows
+        QString valueText;
+        Kind kind = Kind::Stage;
+    };
+    explicit BenchChart(QWidget* parent = nullptr);
+    void setRows(std::vector<Row> rows);
+    void setBottleneckLabel(const QString& text) { bottleneckLabel_ = text; update(); }
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+
+private:
+    std::vector<Row> rows_;
+    QString bottleneckLabel_;
 };
 
 /// Rounded panel whose background honours the panel-opacity setting.

@@ -150,6 +150,48 @@ const QHash<QString, Pair>& table() {
             "Layer 1: AES-256-CTR    Layer 2: XChaCha20-Poly1305\n"
             "Whole-file check: HMAC-SHA512, verified before any plaintext is written"}},
         {"set_source_link", {"原始碼與說明", "Source code and documentation"}},
+
+        // ── Experimental ──────────────────────────────────────────────
+        {"set_experimental", {"實驗性功能", "Experimental"}},
+        {"gpu_enable", {"使用 GPU 加速（OpenCL）", "Use GPU acceleration (OpenCL)"}},
+        {"gpu_device", {"裝置", "Device"}},
+        {"gpu_kind_gpu", {"顯示卡", "GPU"}},
+        {"gpu_kind_cpu", {"CPU", "CPU"}},
+        {"gpu_no_runtime", {"找不到 OpenCL 執行環境，請安裝或更新顯示卡驅動程式。", "No OpenCL runtime found. Install or update your graphics driver."}},
+        {"gpu_no_device", {"已安裝 OpenCL，但找不到可用的裝置。", "OpenCL is installed, but no usable device was found."}},
+        {"gpu_warning", {
+            "加密時金鑰與資料會經過顯示卡記憶體，那裡無法鎖定，也不保證會被清除；enCPTO 用完會主動歸零。"
+            "產生的加密檔和 CPU 完全相同。多數電腦整體不會變快，原因請看下方測速結果。",
+            "Keys and data pass through graphics memory, which can't be locked and isn't guaranteed to be cleared; "
+            "enCPTO zeroes it after use. Encrypted files are identical to the CPU path. "
+            "Most computers won't get faster overall — run the benchmark below to see why."}},
+        {"bench_title", {"測速", "Benchmark"}},
+        {"bench_intro", {"測量這台電腦每個環節的速度，找出限制整體速度的瓶頸。約需 10 秒，期間會用滿 CPU。",
+                         "Measures every stage on this computer and finds what limits overall speed. Takes about 10 seconds at full CPU load."}},
+        {"bench_run", {"開始測速", "Run benchmark"}},
+        {"bench_running", {"測速中… %1/%2", "Measuring… %1/%2"}},
+        {"bench_argon2", {"Argon2id 金鑰推導", "Argon2id key derivation"}},
+        {"bench_aes", {"AES-256-CTR（1 核心）", "AES-256-CTR (1 core)"}},
+        {"bench_chacha", {"XChaCha20-Poly1305（1 核心）", "XChaCha20-Poly1305 (1 core)"}},
+        {"bench_hmac", {"HMAC-SHA512（只能依序）", "HMAC-SHA512 (sequential)"}},
+        {"bench_layers_cpu", {"兩層加密（所有核心）", "Both layers (all cores)"}},
+        {"bench_layers_gpu", {"兩層加密（GPU）", "Both layers (GPU)"}},
+        {"bench_pipe_cpu", {"完整加密流程（CPU）", "Full pipeline (CPU)"}},
+        {"bench_pipe_gpu", {"完整加密流程（GPU）", "Full pipeline (GPU)"}},
+        {"bench_seconds", {"每個檔案 %1 秒（刻意的固定成本）", "%1 s per file (deliberate fixed cost)"}},
+        {"bench_bottleneck", {"瓶頸", "Bottleneck"}},
+        {"bench_summary_hmac", {
+            "瓶頸是 HMAC-SHA512：它必須從頭到尾依序計算，只能用一個核心，所以加密層再快，整體也很難超過約 %1 MiB/s。",
+            "The bottleneck is HMAC-SHA512: it runs in order on a single core, so however fast the cipher layers are, the total stays near %1 MiB/s."}},
+        {"bench_summary_layers", {"瓶頸是加密層本身，增加執行緒或改用 GPU 可能有幫助。",
+                                  "The cipher layers are the bottleneck; more threads or the GPU may help."}},
+        {"bench_details", {"以 %1 個執行緒、每項 %2 MiB 測得。", "Measured with %1 threads, %2 MiB per stage."}},
+        {"bench_gpu_used", {"GPU：%1", "GPU: %1"}},
+        {"bench_gpu_skipped", {"GPU 項目已略過：%1", "GPU stages skipped: %1"}},
+        {"bench_gpu_hint", {"在上方勾選 GPU 加速，就會一起測量 GPU。", "Tick GPU acceleration above to include the GPU."}},
+        {"phase_gpu", {"（GPU）", " (GPU)"}},
+        {"err_gpu", {"GPU 加速失敗。請到「設定 → 實驗性功能」關閉後再試一次。\n\n%1",
+                     "GPU acceleration failed. Turn it off under Settings → Experimental and try again.\n\n%1"}},
     };
     return strings;
 }

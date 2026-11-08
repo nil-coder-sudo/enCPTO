@@ -14,6 +14,8 @@ public:
     int widgetOpacity = 85;      // panels: 0 = transparent, 100 = opaque
     QString language = QStringLiteral("TW");
     int threads = 0;             // 0 = automatic
+    bool gpuEnabled = false;     // experimental OpenCL acceleration
+    int gpuDevice = -1;          // -1 = default device
 
     // password generator
     int genLength = 24;

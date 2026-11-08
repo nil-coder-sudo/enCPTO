@@ -33,6 +33,8 @@ void Prefs::load() {
     widgetOpacity = std::clamp(o.value("widget_opacity").toInt(widgetOpacity), 0, 100);
     language = o.value("language").toString(language);
     threads = std::clamp(o.value("threads").toInt(threads), 0, 256);
+    gpuEnabled = o.value("gpu_enabled").toBool(gpuEnabled);
+    gpuDevice = std::clamp(o.value("gpu_device").toInt(gpuDevice), -1, 255);
     const QJsonObject g = o.value("generator").toObject();
     genLength = std::clamp(g.value("length").toInt(genLength), 8, 128);
     genUpper = g.value("upper").toBool(genUpper);
@@ -52,6 +54,8 @@ void Prefs::save() const {
                   {"widget_opacity", widgetOpacity},
                   {"language", language},
                   {"threads", threads},
+                  {"gpu_enabled", gpuEnabled},
+                  {"gpu_device", gpuDevice},
                   {"generator", g}};
     QSaveFile f(filePath());
     if (f.open(QIODevice::WriteOnly)) {

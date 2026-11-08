@@ -20,7 +20,12 @@ public:
     };
     using Body = std::function<Result(const encpto::Options&)>;
 
-    Task(Body body, unsigned threads, QObject* parent = nullptr);
+    struct Settings {
+        unsigned threads = 0;
+        bool gpu = false;
+        int gpuDevice = -1;
+    };
+    Task(Body body, Settings settings, QObject* parent = nullptr);
 
     void cancel() { cancel_ = true; }
 
@@ -37,7 +42,7 @@ private:
     void onProgress(const encpto::Progress& p);
 
     Body body_;
-    unsigned threads_;
+    Settings settings_;
     std::atomic_bool cancel_{false};
 
     std::mutex mu_;

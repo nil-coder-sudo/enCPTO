@@ -446,6 +446,16 @@ void test_gpu_matches_cpu() {
     bad[v7::kHeaderSize + v7::kMetaSize + 5] ^= 0x40;
     write_all(t.path / "bad.dat", bad);
     CHECK(expect_error([&] { decrypt(t.path / "bad.dat", t.path / "x", kPwd, go); }) == ErrorCode::Tampered);
+    // Regression: concurrent kernel completions once crashed PoCL (~20% of
+    // 2-chunk runs). Repeat the pattern so CI would catch a regression.
+    const auto two = random_data(C + 999);
+    for (int i = 0; i < 25; ++i) {
+        auto o = fast_opts();
+        o.use_gpu = true;
+        v7::Meta m;
+        m.name = "r";
+        CHECK(detail::encrypt_buffer(two, m, kPwd, h, o) == detail::encrypt_buffer(two, m, kPwd, h, fast_opts()));
+    }
 }
 
 void test_gpu_unavailable_device() {

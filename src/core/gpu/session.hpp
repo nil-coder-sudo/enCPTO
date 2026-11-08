@@ -47,6 +47,9 @@ private:
 
     void* context_ = nullptr;  // cl_context (shared, not owned)
     void* keys_ = nullptr;     // cl_mem: Te0 ‖ S-box ‖ AES round keys ‖ ChaCha sub-key
+    void* kernel_ = nullptr;   // cl_kernel, shared by all lanes
+    std::mutex launch_mu_;     // guards kernel arguments + launch (see xor_keystreams)
+    void* last_run_ = nullptr; // cl_event of the previous kernel run (chains runs)
     std::array<std::uint32_t, 2> aes_prefix_words_{};
     std::array<std::uint8_t, 32> subkey_{};
     std::vector<std::unique_ptr<Lane>> lanes_;

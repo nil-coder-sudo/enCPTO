@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(enCPTO
-    VERSION 8.0.0
+    VERSION 8.1.0
     DESCRIPTION "Dual-layer file & folder encryption (Argon2id + AES-256-CTR ⊕ XChaCha20-Poly1305 + HMAC-SHA512)"
     HOMEPAGE_URL "https://github.com/nil-coder-sudo/enCPTO"
     LANGUAGES C CXX)

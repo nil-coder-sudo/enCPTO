@@ -290,7 +290,6 @@ std::array<std::uint32_t, 60> aes256_expand_key(crypto::Bytes key) {
 
 struct Session::Lane {
     cl_command_queue queue = nullptr;
-    cl_kernel kernel = nullptr;
     cl_mem buffer = nullptr;
 };
 
@@ -326,17 +325,16 @@ Session::Session(int device_index, crypto::Bytes k_aes, crypto::Bytes k_xcc,
         keys_ = api.clCreateBuffer(c.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, host.size(),
                                    host.data(), &err);
         cl::check(err, "uploading keys");
+        kernel_ = api.clCreateKernel(c.program, "encpto_xor", &err);
+        cl::check(err, "creating the kernel");
+        cl_mem k = static_cast<cl_mem>(keys_);
+        cl::check(api.clSetKernelArg(static_cast<cl_kernel>(kernel_), 2, sizeof(cl_mem), &k), "kernel arg");
         for (unsigned i = 0; i < std::max(1U, lanes); ++i) {
             auto lane = std::make_unique<Lane>();
             lane->queue = api.clCreateCommandQueue(c.context, device, 0, &err);
             cl::check(err, "creating a command queue");
-            lane->kernel = api.clCreateKernel(c.program, "encpto_xor", &err);
-            cl::check(err, "creating the kernel");
             lane->buffer = api.clCreateBuffer(c.context, CL_MEM_READ_WRITE, v7::kChunkSize, nullptr, &err);
             cl::check(err, "allocating device memory");
-            cl_mem k = static_cast<cl_mem>(keys_);
-            cl::check(api.clSetKernelArg(lane->kernel, 0, sizeof(cl_mem), &lane->buffer), "kernel arg");
-            cl::check(api.clSetKernelArg(lane->kernel, 2, sizeof(cl_mem), &k), "kernel arg");
             free_.push_back(lane.get());
             lanes_.push_back(std::move(lane));
         }
@@ -366,10 +364,17 @@ void Session::cleanup() noexcept {
             api.clFinish(lane->queue);
         }
         if (lane->buffer != nullptr) api.clReleaseMemObject(lane->buffer);
-        if (lane->kernel != nullptr) api.clReleaseKernel(lane->kernel);
         if (lane->queue != nullptr) api.clReleaseCommandQueue(lane->queue);
     }
     lanes_.clear();
+    if (last_run_ != nullptr) {
+        api.clReleaseEvent(static_cast<cl_event>(last_run_));
+        last_run_ = nullptr;
+    }
+    if (kernel_ != nullptr) {
+        api.clReleaseKernel(static_cast<cl_kernel>(kernel_));
+        kernel_ = nullptr;
+    }
     free_.clear();
     if (keys_ != nullptr) {
         api.clReleaseMemObject(static_cast<cl_mem>(keys_));
@@ -410,22 +415,36 @@ void Session::xor_keystreams(std::uint64_t chunk_index, std::uint8_t* data, std:
     const cl_uint pre0 = aes_prefix_words_[0], pre1 = aes_prefix_words_[1];
     const cl_uint chunk = static_cast<cl_uint>(chunk_index);
     const cl_uint n13 = le32(n12), n14 = le32(n12 + 4), n15 = le32(n12 + 8);
-    cl_kernel k = lane->kernel;
-    cl::check(api.clSetKernelArg(k, 1, sizeof nseg, &nseg), "kernel arg");
-    cl::check(api.clSetKernelArg(k, 3, sizeof pre0, &pre0), "kernel arg");
-    cl::check(api.clSetKernelArg(k, 4, sizeof pre1, &pre1), "kernel arg");
-    cl::check(api.clSetKernelArg(k, 5, sizeof chunk, &chunk), "kernel arg");
-    cl::check(api.clSetKernelArg(k, 6, sizeof n13, &n13), "kernel arg");
-    cl::check(api.clSetKernelArg(k, 7, sizeof n14, &n14), "kernel arg");
-    cl::check(api.clSetKernelArg(k, 8, sizeof n15, &n15), "kernel arg");
-
     // Bytes past `size` in the last segment are garbage on the device and are
     // never copied back.
     const std::size_t global = (nseg + kLocalSize - 1) / kLocalSize * kLocalSize;
     cl::check(api.clEnqueueWriteBuffer(lane->queue, lane->buffer, CL_FALSE, 0, size, data, 0, nullptr, nullptr),
               "uploading a chunk");
-    cl::check(api.clEnqueueNDRangeKernel(lane->queue, k, 1, nullptr, &global, &kLocalSize, 0, nullptr, nullptr),
-              "running the kernel");
+    {
+        // One kernel object for all lanes: arguments are captured at enqueue
+        // time, so setting them and launching under a lock is enough.
+        // Kernel runs are chained with an event so they never overlap — a
+        // single run already fills the device, and some drivers (PoCL) race
+        // when the same kernel completes on two queues at once. Uploads and
+        // downloads of other lanes still overlap with the running kernel.
+        std::lock_guard lk(launch_mu_);
+        auto* k = static_cast<cl_kernel>(kernel_);
+        cl::check(api.clSetKernelArg(k, 0, sizeof(cl_mem), &lane->buffer), "kernel arg");
+        cl::check(api.clSetKernelArg(k, 1, sizeof nseg, &nseg), "kernel arg");
+        cl::check(api.clSetKernelArg(k, 3, sizeof pre0, &pre0), "kernel arg");
+        cl::check(api.clSetKernelArg(k, 4, sizeof pre1, &pre1), "kernel arg");
+        cl::check(api.clSetKernelArg(k, 5, sizeof chunk, &chunk), "kernel arg");
+        cl::check(api.clSetKernelArg(k, 6, sizeof n13, &n13), "kernel arg");
+        cl::check(api.clSetKernelArg(k, 7, sizeof n14, &n14), "kernel arg");
+        cl::check(api.clSetKernelArg(k, 8, sizeof n15, &n15), "kernel arg");
+        auto* prev = static_cast<cl_event>(last_run_);
+        cl_event done = nullptr;
+        cl::check(api.clEnqueueNDRangeKernel(lane->queue, k, 1, nullptr, &global, &kLocalSize,
+                                             prev != nullptr ? 1 : 0, prev != nullptr ? &prev : nullptr, &done),
+                  "running the kernel");
+        if (prev != nullptr) api.clReleaseEvent(prev);
+        last_run_ = done;
+    }
     cl::check(api.clEnqueueReadBuffer(lane->queue, lane->buffer, CL_TRUE, 0, size, data, 0, nullptr, nullptr),
               "downloading a chunk");
 }

@@ -34,7 +34,8 @@ namespace encpto::gpu::cl {
     X(clEnqueueReadBuffer)            \
     X(clEnqueueFillBuffer)            \
     X(clEnqueueNDRangeKernel)         \
-    X(clFinish)
+    X(clFinish)                       \
+    X(clReleaseEvent)
 
 struct Api {
 #define X(name) decltype(&::name) name = nullptr;
