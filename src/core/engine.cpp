@@ -519,5 +519,24 @@ std::vector<std::uint8_t> encrypt_buffer(const std::vector<std::uint8_t>& payloa
     return out;
 }
 
+void encrypt_discard(const std::vector<std::uint8_t>& source, std::uint64_t size,
+                     std::string_view password, const Options& opts) {
+    std::uint64_t pos = 0;
+    v7::Meta meta;
+    meta.name = "benchmark";
+    encrypt_stream(
+        [&](std::uint8_t* p, std::size_t n) {
+            for (std::size_t done = 0; done < n;) {
+                const std::size_t off = static_cast<std::size_t>(pos % source.size());
+                const std::size_t k = std::min(n - done, source.size() - off);
+                std::memcpy(p + done, source.data() + off, k);
+                done += k;
+                pos += k;
+            }
+            return n;
+        },
+        size, [](const std::uint8_t*, std::size_t) {}, meta, password, random_header(opts), opts);
+}
+
 }  // namespace detail
 }  // namespace encpto

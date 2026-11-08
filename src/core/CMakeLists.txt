@@ -2,6 +2,7 @@ configure_file(version.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/encpto/versi
 
 add_library(encpto_core STATIC
     archive.cpp
+    bench.cpp
     crypto.cpp
     engine.cpp
     file.cpp

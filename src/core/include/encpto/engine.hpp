@@ -51,6 +51,10 @@ namespace detail {
 std::vector<std::uint8_t> encrypt_buffer(const std::vector<std::uint8_t>& payload,
                                          const v7::Meta& meta, std::string_view password,
                                          const v7::Header& header, const Options& opts = {});
+/// Benchmark helper: encrypts `size` bytes taken cyclically from `source`
+/// through the full pipeline (both layers + HMAC) and discards the output.
+void encrypt_discard(const std::vector<std::uint8_t>& source, std::uint64_t size,
+                     std::string_view password, const Options& opts);
 }  // namespace detail
 
 }  // namespace encpto
